@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
+[project]
+name = "treno"
+version = "0.0.1"
+authors = [
+  { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
+]
+description = "My DL arch"
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/erosmontin/treno"
+"Bug Tracker" = "https://github.com/erosmontin/treno/issues"
