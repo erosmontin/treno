@@ -116,16 +116,42 @@ class ImaRoiDataset(ImaginableDataset):
 
 import numpy as np
 
-def compute_prob(N):
+def compute_prob(N,t='fuzzy',other=None):
+    N=N.astype(np.float32)
     S=N.shape
     N[N>0]=1
-    D=np.zeros(S)
-    for t in range(3):
-        T=np.expand_dims(N.sum(axis=t),axis=t)
-        d=np.ones((1,3),dtype=np.uint64)[0]
-        d[t]=S[t]
-        D+=np.tile(T,[int(g) for g in d])
-    D/=np.max(D)
+    D=np.zeros(S,dtype=np.float32)
+
+    if t=='padding':
+        a=ima.Roiable()
+        N[N>0]=1.0
+        a.setImageFromNumpy(N)
+        a.dilateRadius(int(other))
+        D=a.getImageAsNumpy()
+        D/=np.max(D)
+        D[N>0]=1.0    
+    elif t=='fuzzy':
+        a=ima.Imaginable()
+        N[N>0]=1.0
+        a.setImageFromNumpy(N)
+        gaussian = sitk.MeanImageFilter()
+        gaussian.SetRadius(int(other))
+        D=gaussian.Execute(a.getImage())
+        a.setImage(D)
+        a.divide(a.getMaximumValue())
+        D=a.getImageAsNumpy()
+        D/=np.max(D)
+        D[N>0]=1.0
+
+
+    else:
+        for t in range(3):
+            T=np.expand_dims(N.sum(axis=t),axis=t)
+            d=np.ones((1,3),dtype=np.uint64)[0]
+            d[t]=S[t]
+            D+=np.tile(T,[int(g) for g in d])
+        D/=np.max(D)
+
     return D
 
 def getcenter(D,borders=None,th=0.5):    
@@ -152,9 +178,9 @@ def getboundaries(D,size,th=0.5):
 
 
 
-def cutAndCat(x,y,X,Y,NR,size,th=0.5):
+def cutAndCat(x,y,X,Y,NR,size,th=0.5,sampling='fuzzy',samplingsigma=2.0):
     for a in range(NR):
-        D=compute_prob(y.getImageAsNumpy())
+        D=compute_prob(y.getImageAsNumpy(),sampling,samplingsigma)
         L,U=getboundaries(D,size,th)
         x.cropImage(L,U)
         y.cropImage(L,U)
@@ -164,7 +190,7 @@ def cutAndCat(x,y,X,Y,NR,size,th=0.5):
         y.undo()
     return X,Y
 
-def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution=1,RT=[],th=0.2):
+def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution=1,RT=[],th=0.2,sampling='fuzzy',samplingsigma=2.0):
     nRT=len(RT) # at least the non rototrnslated
     X=np.zeros([NR+(ND*nRT),1,*size],dtype=np.float32)
     Y=np.zeros([NR+(ND*nRT),1,*size],dtype=np.float32)
@@ -175,7 +201,7 @@ def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution
         y.changeImageSpacing(SP)
     _in_=0
     _out_=NR
-    X[_in_:_out_],Y[_in_:_out_]=cutAndCat(x,y,X[_in_:_out_],Y[_in_:_out_],NR,size,th)
+    X[_in_:_out_],Y[_in_:_out_]=cutAndCat(x,y,X[_in_:_out_],Y[_in_:_out_],NR,size,th,sampling=sampling,samplingsigma=samplingsigma)
     for ind,t in enumerate(RT):
         x2=x.getDuplicate()
         y2=y.getDuplicate()
@@ -183,7 +209,7 @@ def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution
         y2.transform(t)
         in_=NR+(ind)*ND
         out_=NR+(ind+1)*ND
-        X[in_:out_],Y[in_:out_]=cutAndCat(x2,y2,X[in_:out_],Y[in_:out_],ND,size,th)
+        X[in_:out_],Y[in_:out_]=cutAndCat(x2,y2,X[in_:out_],Y[in_:out_],ND,size,th,sampling=sampling,samplingsigma=samplingsigma)
 
 
     return torch.from_numpy(X) , torch.from_numpy(Y)
@@ -216,7 +242,7 @@ if __name__=="__main__":
     S=sitk.ScaleTransform(x.getImageDimension())
     S.SetScale([0.9,0.9,0.9])
     # S.SetCenter()
-    X,Y=ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms=transforms,ND=5,RT=[T,S],th=0.1)
+    X,Y=ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms=transforms,ND=5,RT=[T,S],th=0.1,sampling='padding',samplingsigma=10)
 
     print(X)
     print(Y)
