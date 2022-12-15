@@ -36,7 +36,7 @@ def possibletransforms(xI,yI,tr):
     if 'normalizex' in tr.keys():
         xI=normalize(xI,tr["normalizex"])
     if 'normalizey' in tr.keys():
-        yI=normalize(yI,tr["normalizex"])
+        yI=normalize(yI,tr["normalizey"])
     if 'normalizexv' in tr.keys():
         xI=normalize(xI,"value",tr["normalizexv"])
     if 'normalizeyv' in tr.keys():
@@ -62,7 +62,7 @@ class ImaginableDataset(Dataset):
         if self.transform==None:
             pass
         else:
-            possibletransforms(xI,yIself.transform)
+            xI,yI=possibletransforms(xI,yI,self.transform)
         return xI,yI
     def __gettheimages__(self,idx):
         xI = ima.Imaginable(filename=self.listofdata.iloc[idx, 0])
@@ -125,9 +125,11 @@ def compute_prob(N):
         d=np.ones((1,3),dtype=np.uint64)[0]
         d[t]=S[t]
         D+=np.tile(T,[int(g) for g in d])
+    D/=np.max(D)
     return D
 
-def getcenter(D,borders=None):    
+def getcenter(D,borders=None,th=0.5):    
+    
     MAS=D.shape
 
     dim=len(MAS)
@@ -137,18 +139,23 @@ def getcenter(D,borders=None):
         B=borders
     MASF=[np.floor(s-b) for s,b in zip(MAS,B)]
     MISF=[np.ceil(s+b) for s,b in zip(MIS,B)]
-    return [int(np.random.randint(mi,ma,1)) for mi,ma in zip(MISF,MASF)]
-def getboundaries(D,size):
+    f=0
+    while(f<th):
+        P=[int(np.random.randint(mi,ma,1)) for mi,ma in zip(MISF,MASF)]
+        f=D[tuple(P)]
+    
+    return P
+def getboundaries(D,size,th=0.5):
     B=[np.ceil(s/2) for s in size]
-    C=getcenter(D,B)
+    C=getcenter(D,B,th)
     return [int(c-b) for c,b in zip(C,B) ],[int(c+b) for c,b in zip(C,B) ]
 
 
 
-def cutAndCat(x,y,X,Y,NR,size):
+def cutAndCat(x,y,X,Y,NR,size,th=0.5):
     for a in range(NR):
         D=compute_prob(y.getImageAsNumpy())
-        L,U=getboundaries(D,size)
+        L,U=getboundaries(D,size,th)
         x.cropImage(L,U)
         y.cropImage(L,U)
         X[a]=np.expand_dims(x.getImageAsNumpy().astype(np.float32),0)
@@ -157,17 +164,18 @@ def cutAndCat(x,y,X,Y,NR,size):
         y.undo()
     return X,Y
 
-def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution=1,RT=[]):
+def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution=1,RT=[],th=0.2):
     nRT=len(RT) # at least the non rototrnslated
-    X=np.zeros([NR+(ND*nRT),1,*size])
-    Y=np.zeros([NR+(ND*nRT),1,*size])
-    possibletransforms(x,y,transforms)
+    X=np.zeros([NR+(ND*nRT),1,*size],dtype=np.float32)
+    Y=np.zeros([NR+(ND*nRT),1,*size],dtype=np.float32)
+    x,y=possibletransforms(x,y,transforms)
     SP=[resolution,resolution,resolution]
     if(x.getImageSpacing()[0]!=resolution):
         x.changeImageSpacing(SP)
         y.changeImageSpacing(SP)
-    
-
+    _in_=0
+    _out_=NR
+    X[_in_:_out_],Y[_in_:_out_]=cutAndCat(x,y,X[_in_:_out_],Y[_in_:_out_],NR,size,th)
     for ind,t in enumerate(RT):
         x2=x.getDuplicate()
         y2=y.getDuplicate()
@@ -175,7 +183,7 @@ def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution
         y2.transform(t)
         in_=NR+(ind)*ND
         out_=NR+(ind+1)*ND
-        X[in_:out_],Y[in_:out_]=cutAndCat(x2,y2,X[in_:out_],Y[in_:out_],ND,size)
+        X[in_:out_],Y[in_:out_]=cutAndCat(x2,y2,X[in_:out_],Y[in_:out_],ND,size,th)
 
 
     return torch.from_numpy(X) , torch.from_numpy(Y)
@@ -185,32 +193,37 @@ def ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,resolution
 
 
 if __name__=="__main__":
-    # all_transforms={'resize':[320,320,120],'normalizex':'max'}
-    # train_dataset0 = ImaginableDataset('treno/test.txt',transform=all_transforms)
-    # x,y = train_dataset0.__getitem__(0)
-    # print(x.shape)
-    # print(y.shape)
+    all_transforms={'resize':[320,320,120],'normalizex':'max'}
+    transforms={'normalizex':'max'}
+    # train_dataset0 = ImaginableLabelmapDataset('treno/test.txt',transform=all_transforms)
+    # # x,y = train_dataset0.__getitem__(0)
+    # # print(x.shape)
+    # # print(y.shape)
     # test_loader0 = torch.utils.data.DataLoader(dataset = train_dataset0,
     #                                        batch_size = 2,
     #                                        shuffle = False)
-    # x,y=next(iter(test_loader0))
-    # print(x.shape)
-    # print(y.shape)
+    # X,Y=next(iter(test_loader0))
+    # print(X.shape)
+    # print(Y.shape)
+    
+    
     train_dataset = ImaRoiDataset('treno/test.txt')
     x,y=train_dataset.__getitem__(1)
 
 
     import SimpleITK as sitk
     T=sitk.TranslationTransform(x.getImageDimension(),[5,5,5]),
-    S=sitk.ScaleTransform(x.getImageDimension(),[1,1,1])
-    S.SetScale([1.1,1.1,1.1])
+    S=sitk.ScaleTransform(x.getImageDimension())
+    S.SetScale([0.9,0.9,0.9])
     # S.SetCenter()
-    X,Y=ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms={},ND=5,RT=[T,S])
+    X,Y=ImaginableDataloader(x,y,size=[60,60,60],NR=10,transforms=transforms,ND=5,RT=[T,S],th=0.1)
 
     print(X)
     print(Y)
 
-
+    for a in range(X.shape[0]):
+        ima.saveNumpy(X[a,0],f'/g/x1{a}.nii.gz')
+        ima.saveNumpy(Y[a,0],f'/g/y1{a}.nii.gz')
     # train_dataset1 = ImaginableLabelmapDataset('treno/test.txt',transform=all_transforms,index=[0,1,2])
     # x,y = train_dataset1.__getitem__(0)
     # test_loader1 = torch.utils.data.DataLoader(dataset = train_dataset1,
