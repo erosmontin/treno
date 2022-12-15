@@ -1,0 +1,3 @@
+x,y
+/data/PROJECTS/HIPSEGENTATION/data_link/input/p02.nii.gz,/data/PROJECTS/HIPSEGENTATION/data_link/output/p02roi.nii.gz
+/data/PROJECTS/HIPSEGENTATION/data_link/input/p03.nii.gz,/data/PROJECTS/HIPSEGENTATION/data_link/output/p03roi.nii.gz

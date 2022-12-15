@@ -5,27 +5,25 @@ import torch
 import torchvision.transforms.functional as TF
 # https://pyimagesearch.com/2021/11/08/u-net-training-image-segmentation-models-in-pytorch/
 #https://amaarora.github.io/2020/09/13/unet.html
+# https://idiomaticprogrammers.com/post/unet-architecture/
 
 class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, strides, padding,bias=False,dimensions=2):
+    def __init__(self, in_channels, out_channels, kernel_size, strides, padding,bias=False,dimensions=2, leaky_relu=0.1):
         super(DoubleConv, self).__init__()
         if dimensions==2:
-            self.conv = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
-                nn.BatchNorm2d(num_features=out_channels),
-                nn.LeakyReLU(0.1,inplace=True),
-                nn.Conv2d(out_channels, out_channels, kernel_size, strides, padding, bias=bias),
-                nn.BatchNorm2d(num_features=out_channels),
-                nn.LeakyReLU(0.1,inplace=True)
-            )
+            C= nn.Conv2d
+            B = nn.BatchNorm2d
         if dimensions==3:
-            self.conv = nn.Sequential(
-                nn.Conv3d(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
-                nn.BatchNorm3d(num_features=out_channels),
-                nn.LeakyReLU(0.1,inplace=True),
-                nn.Conv3d(out_channels, out_channels, kernel_size, strides, padding, bias=bias),
-                nn.BatchNorm3d(num_features=out_channels),
-                nn.LeakyReLU(0.1,inplace=True)
+            C= nn.Conv3d
+            B = nn.BatchNorm3d
+        R = nn.LeakyReLU
+        self.conv = nn.Sequential(
+                C(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                B(num_features=out_channels),
+                R(leaky_relu,inplace=True),
+                C(out_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                B(num_features=out_channels),
+                R(leaky_relu,inplace=True)
             )
 
     def forward(self, x):
@@ -33,7 +31,7 @@ class DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels, num_segmentations=1, features=[64, 128, 256, 512],dimensions=2):
+    def __init__(self, in_channels, num_segmentations=1, features=[64, 128, 256, 512],dimensions=2,kernel_size=3,padding_size=1,stride_size=1):
         super(UNet, self).__init__()
         self.dimensions= dimensions
         self.ups = nn.ModuleList()
@@ -46,37 +44,43 @@ class UNet(nn.Module):
             padding=1,
             dimensions=self.dimensions
         )
-        if self.dimensions==2:
-            self.output = nn.Conv2d(
+
+
+        if dimensions==2:
+            C= nn.Conv2d
+            B = nn.BatchNorm2d
+            P = nn.MaxPool2d
+            T= nn.ConvTranspose2d
+        elif dimensions==3:
+            C= nn.Conv3d
+            B = nn.BatchNorm3d
+            P = nn.MaxPool3d
+            T= nn.ConvTranspose3d
+
+        self.output = C(
                 in_channels=features[0],
                 out_channels=num_segmentations,
                 kernel_size=1
             )
-            self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        elif self.dimensions==3:
-            self.output = nn.Conv3d(
-                in_channels=features[0],
-                out_channels=num_segmentations,
-                kernel_size=1
-            )
-            self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
+
+        self.pool = P(kernel_size=2, stride=2)
 
         in_channels_iter = in_channels
+
         for feature in features:
             self.downs.append(DoubleConv(
                     in_channels=in_channels_iter,
                     out_channels=feature,
-                    kernel_size=3,
-                    strides=1,
-                    padding=1,
+                    kernel_size=kernel_size,
+                    strides=stride_size,
+                    padding=padding_size,
                     dimensions=self.dimensions
                 ))
             in_channels_iter = feature
 
         for feature in reversed(features):
-            if self.dimensions==2:
-                up = nn.Sequential(
-                    nn.ConvTranspose2d(
+            up = nn.Sequential(
+                    T(
                         in_channels=feature*2,
                         out_channels=feature,
                         kernel_size=2,
@@ -86,27 +90,9 @@ class UNet(nn.Module):
                     DoubleConv(
                         in_channels=feature*2,
                         out_channels=feature,
-                        kernel_size=3,
-                        padding=1,
-                        strides=1,
-                        dimensions=self.dimensions
-                    )
-                )
-            elif self.dimensions==3:
-                up = nn.Sequential(
-                    nn.ConvTranspose3d(
-                        in_channels=feature*2,
-                        out_channels=feature,
-                        kernel_size=2,
-                        stride=2,
-                        padding=0
-                    ),
-                    DoubleConv(
-                        in_channels=feature*2,
-                        out_channels=feature,
-                        kernel_size=3,
-                        padding=1,
-                        strides=1,
+                        kernel_size=kernel_size,
+                        padding=padding_size,
+                        strides=stride_size,
                         dimensions=self.dimensions
                     )
                 )
@@ -116,7 +102,6 @@ class UNet(nn.Module):
     def forward(self, x):
         skip_connections = []
         for it,down in enumerate(self.downs):
-        # for down in self.downs:
             x = down(x)
             skip_connections.append(x)
             x = self.pool(x)

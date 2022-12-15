@@ -1,0 +1,14 @@
+name: pytorch_me
+channels:
+#  - postelrich
+  - conda-forge
+dependencies:
+  - python>=3.6
+  - numpy
+  - simpleitk>2.0
+  - matplotlib
+  - pip
+  - pip:
+    - vtk
+    - git+https://github.com/erosmontin/pynico
+    - git+https://github.com/erosmontin/pyable
