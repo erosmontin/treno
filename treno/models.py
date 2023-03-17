@@ -31,18 +31,20 @@ class DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels, num_segmentations=1, features=[64, 128, 256, 512],dimensions=2,kernel_size=3,padding_size=1,stride_size=1):
+    def __init__(self, in_channels, num_segmentations=1, features=[64, 128, 256, 512],dimensions=2,kernel_size=3,padding_size=1,stride_size=1,leaky_relu=0.1):
         super(UNet, self).__init__()
         self.dimensions= dimensions
+        self.leaky_relu_value=leaky_relu
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
         self.bottleneck = DoubleConv(
             in_channels=features[-1],
             out_channels=features[-1]*2,
-            kernel_size=3,
-            strides=1,
-            padding=1,
-            dimensions=self.dimensions
+            kernel_size=kernel_size, #3
+            strides=stride_size,#1
+            padding=padding_size,#1
+            dimensions=self.dimensions,
+            leaky_relu=leaky_relu
         )
 
 
@@ -118,11 +120,13 @@ class UNet(nn.Module):
             # If the height and width of output tensor and skip connection
             # is not same then resize the tensor
             if x.shape != skip_connection.shape:
-                if self.dimensions==2:
-                    x = TF.resize(x, size=skip_connection.shape[2:])
-                elif self.dimensions==3:
-                    U = torch.nn.Upsample(size=skip_connection.shape[2:])
-                    x= U(x)
+                U = torch.nn.Upsample(size=skip_connection.shape[2:])
+                x= U(x)
+                # if self.dimensions==2:
+                #     x = TF.resize(x, size=skip_connection.shape[2:])
+                # elif self.dimensions==3:
+                #     U = torch.nn.Upsample(size=skip_connection.shape[2:])
+                #     x= U(x)
 
 
             # Concat the output tensor with skip connection
@@ -132,7 +136,7 @@ class UNet(nn.Module):
             x = self.ups[i][1](concat_x)
 
         return self.output(x)
-class Unetplus(UNet):
+class UNetPlus(UNet):
     def forward(self, x,info_matrix=None):
         skip_connections = []
         for it,down in enumerate(self.downs):
@@ -173,11 +177,8 @@ class Unetplus(UNet):
             # If the height and width of output tensor and skip connection
             # is not same then resize the tensor
             if x.shape != skip_connection.shape:
-                if self.dimensions==2:
-                    x = TF.resize(x, size=skip_connection.shape[2:])
-                elif self.dimensions==3:
-                    U = torch.nn.Upsample(size=skip_connection.shape[2:])
-                    x= U(x)
+                U = torch.nn.Upsample(size=skip_connection.shape[2:])
+                x= U(x)
 
             # Concat the output tensor with skip connection
             concat_x = torch.cat((skip_connection, x), dim=1)
@@ -186,9 +187,19 @@ class Unetplus(UNet):
             x = self.ups[i][1](concat_x)
         return self.output(x)
 
+class UnetSegmentation(UNet):
+    def forward(self, x):
+        x =super().forward(x)
+        return nn.ReLU(inplace=True)
+    
+class UnetSegmentationPlus(UNetPlus):
+    def forward(self, x):
+        x =super().forward(x)
+        return nn.ReLU(inplace=True)
+        
 if __name__ == "__main__":
     image = torch.randn((2, 3, 50, 50,50))
-    model = Unetplus(in_channels=3,dimensions=3)
+    model = UNetPlus(in_channels=3,dimensions=3,kernel_size=3)
     out = model(image,torch.randn(2,4))
     print(image.shape, out.shape)
     assert out.shape == (2, 1, 50, 50,50)

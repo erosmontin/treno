@@ -5,8 +5,8 @@ channels:
 dependencies:
   - python>=3.6
   - numpy
-  - simpleitk>2.0
   - matplotlib
+  - pandas
   - pip
   - pip:
     - vtk
