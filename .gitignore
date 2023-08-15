@@ -1,1 +1,4 @@
 dist/
+*.whl
+dist/treno-0.0.1.tar.gz
+rnn_torchviz.png

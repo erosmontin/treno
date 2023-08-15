@@ -1,0 +1,24 @@
+from sklearn.metrics import confusion_matrix, roc_auc_score, multilabel_confusion_matrix
+
+
+def accuracy()
+def binaryTestPrediction(Ygt,Yhat):
+    tn_, fp_, fn_, tp_ = confusion_matrix(Ygt.flatten(), Yhat.flatten()).ravel()
+    tp_=float(tp_)
+    tn_=float(tn_)
+    fn_=float(fn_)
+    fp_=float(fp_)
+    tacc=(tp_+tn_)/(tp_+tn_+fn_+fp_)
+    o={"accuracy":tacc,
+    "specificity":( tn_ /(tn_+fp_)),
+    "sensitivity":( tp_ /(tp_+fn_)),
+    "tn":tn_,
+    "tp":tp_,
+    "fp":fp_,
+    "fn":fn_,
+    "auc":roc_auc_score(Ygt.flatten(), Yhat.flatten())}
+    return o
+
+def multylabelTEstPrediciton(Ygt,Yhat):
+    for c in  multilabel_confusion_matrix(Ygt.flatten(), Yhat.flatten()):
+        tn_, fp_, fn_, tp_ = confusion_matrix(Ygt.flatten(), Yhat.flatten()).ravel()

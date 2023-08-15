@@ -1,17 +1,20 @@
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [project]
 name = "treno"
-version = "0.0.1"
+version = "0.0.3"
 authors = [
   { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
 ]
-description = "My DL arch"
+description = "My AI"
 readme = "README.md"
 requires-python = ">=3.6"
+dependencies = ["torchviz","torch","numpy","scikit-learn","torchvision","tensorboard","pynico_eros_montin @ git+https://github.com/erosmontin/pynico.git","pyable_eros_montin @ git+https://github.com/erosmontin/pyable.git"]
+
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
