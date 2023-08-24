@@ -170,6 +170,15 @@ class EMUnetPlus(EMUNet):
         self.fc = nn.Linear(initial_parameters+ nscalars,initial_parameters ,bias=True)
         
     def bottleneck(self, x,parameters):
+        """_summary_
+
+        Args:
+            x (_type_): the input variable at the bottleneck
+            parameters (_type_): n parwmters to add at the bottleneck
+
+        Returns:
+            _type_: the classical bottleneck of a cnn
+        """        
         O=x.shape
         x = self.fc(torch.concat((x.view(-1),parameters)))
         x=x.view(O)
@@ -180,9 +189,9 @@ class EMUnetSegmentation(EMUNet):
         x = super().forward(x)
         return nn.Sigmoid(x,inplace=True)
 
-class EMUnetSegmentation(EMUNet):
-    def forward(self, x):
-        x = super().forward(x)
+class EMUnetSegmentationPlus(EMUnetPlus):
+    def forward(self, x,params=None):
+        x = super().forward(x,params=params)
         return nn.Sigmoid(x,inplace=True)
 
 

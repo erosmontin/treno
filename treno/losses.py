@@ -45,4 +45,8 @@ class EMBinarySegmentaitonMultiLoss(nn.Module):
         super().__init__()
         self.ce=nn.BCELoss()
 
-
+import sklearn
+import numpy as np
+def getCEClassWeights(y):
+    _y=y.flatten()
+    return sklearn.utils.class_weight.compute_class_weight('balanced', classes=np.unique(_y), y=_y)
