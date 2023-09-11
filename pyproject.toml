@@ -6,14 +6,14 @@ allow-direct-references = true
 
 [project]
 name = "treno"
-version = "0.0.4"
+version = "0.0.5"
 authors = [
   { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
 ]
 description = "My AI"
 readme = "README.md"
-requires-python = ">=3.6"
-dependencies = ["torchviz","torch","numpy","scikit-learn","torchvision","tensorboard","pynico_eros_montin @ git+https://github.com/erosmontin/pynico.git","pyable_eros_montin @ git+https://github.com/erosmontin/pyable.git"]
+requires-python = ">=3.9"
+dependencies = ["cudatoolkit","torchviz","torch","numpy","scikit-learn","torchvision","tensorboard","pynico_eros_montin @ git+https://github.com/erosmontin/pynico.git","pyable_eros_montin @ git+https://github.com/erosmontin/pyable.git"]
 
 classifiers = [
     "Programming Language :: Python :: 3",

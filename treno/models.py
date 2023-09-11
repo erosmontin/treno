@@ -186,13 +186,16 @@ class EMUnetPlus(EMUNet):
 
 class EMUnetSegmentation(EMUNet):
     def forward(self, x):
+        S=nn.Sigmoid()
         x = super().forward(x)
-        return nn.Sigmoid(x,inplace=True)
+        return S(x)
+
 
 class EMUnetSegmentationPlus(EMUnetPlus):
     def forward(self, x,params=None):
+        S=nn.Sigmoid()
         x = super().forward(x,params=params)
-        return nn.Sigmoid(x,inplace=True)
+        return S(x)
 
 
 class EMLeNetPlus(EMUnetPlus):
