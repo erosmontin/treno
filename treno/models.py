@@ -135,14 +135,13 @@ class EMUNet(nn.Module):
     def bottleneck(self,x):
         return self.bottleneckNN(x)
     
-    def forward(self, x,params=None):
+    def forward(self, x):
         skip_connections = []
         for it, down in enumerate(self.downs):
             x = down(x)
             skip_connections.append(x)
             x = self.pool(x)
-        x = self.bottleneck(x,params)
-        print(x.shape)
+        x = self.bottleneck(x)
         skip_connections = skip_connections[::-1]
         for i in range(len(self.ups)):
             x = self.ups[i][0](x)  # Pass through ConvTranspose first
