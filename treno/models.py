@@ -55,6 +55,8 @@ class EMUNet(nn.Module):
             self.B = nn.BatchNorm3d
             self.P = nn.MaxPool3d
             self.T = nn.ConvTranspose3d
+        
+        self.bias=bias
 
         if not batchinbox:
             self.B = None
@@ -83,9 +85,9 @@ class EMUNet(nn.Module):
         self.output = self.C(
                 in_channels=features[0],
                 out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride_size,
-                padding=padding_size,
+                kernel_size=1,
+                # stride=stride_size,
+                # padding=padding_size,
                 bias=bias
             )
 
@@ -166,7 +168,7 @@ class EMUnetPlus(EMUNet):
         self.NDOWN=len(self.downs)*2
         self.image_size_d=np.prod(np.array([a//self.NDOWN for a in image_size]))
         initial_parameters=self.image_size_d*features[-1]
-        self.fc = nn.Linear(initial_parameters+ nscalars,initial_parameters ,bias=True)
+        self.fc = nn.Linear(initial_parameters+ nscalars,initial_parameters ,bias=self.bias)
         
     def bottleneck(self, x,parameters):
         """_summary_
@@ -185,14 +187,14 @@ class EMUnetPlus(EMUNet):
 
 class EMUnetSegmentation(EMUNet):
     def forward(self, x):
-        S=nn.Sigmoid()
+        S=nn.Softmax(dim=1)
         x = super().forward(x)
         return S(x)
 
 
 class EMUnetSegmentationPlus(EMUnetPlus):
     def forward(self, x,params=None):
-        S=nn.Sigmoid()
+        S=nn.Softmax(dim=1)
         x = super().forward(x,params=params)
         return S(x)
 
