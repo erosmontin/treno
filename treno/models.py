@@ -10,9 +10,27 @@ import torchvision.transforms.functional as TF
 
 
 class SingleBox(nn.Module):
+    """
+    A module that represents a single box in a neural network model.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv (nn.Module): Convolutional layer module.
+        batch (nn.Module, optional): Batch normalization module. Defaults to None.
+        relu (nn.Module): ReLU activation module.
+        kernel_size (int or tuple): Size of the convolutional kernel.
+        strides (int or tuple): Strides for the convolution operation.
+        padding (int or tuple): Padding for the convolution operation.
+        bias (bool, optional): Whether to include bias in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope for the LeakyReLU activation. Defaults to 0.1.
+    """
+
     def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
         super().__init__()
         if batch is not None:
+            # Your code here
+            pass
             self.core = nn.Sequential(
                 conv(in_channels, out_channels, kernel_size,
                      strides, padding, bias=bias),
@@ -31,6 +49,25 @@ class SingleBox(nn.Module):
 
 
 class DoubleBox(SingleBox):
+    """
+    A class representing a double box in a neural network model.
+
+    Inherits from the SingleBox class and extends it by applying two SingleBox layers sequentially.
+    in the and then a box normalization and a relu activation.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv (nn.Module): Convolutional layer module.
+        batch (nn.Module): Batch normalization layer module.
+        relu (nn.Module): ReLU activation layer module.
+        kernel_size (int or tuple): Size of the convolutional kernel.
+        strides (int or tuple): Stride of the convolution.
+        padding (int or tuple): Padding added to the input.
+        bias (bool, optional): Whether to include a bias term in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope coefficient for LeakyReLU activation. Defaults to 0.1.
+    """
+
     def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
         super().__init__(in_channels, out_channels, conv, batch,
                          relu, kernel_size, strides, padding, bias, leaky_relu)
@@ -41,9 +78,169 @@ class DoubleBox(SingleBox):
                       kernel_size, strides, padding, bias, leaky_relu),
         )
 
+class DoubleBoxv2(SingleBox):
+    """
+    A class representing a double box in a neural network model.
+    the right version of the double box
+
+    Inherits from the SingleBox class and extends it by applying two SingleBox layers sequentially.
+    in the and then a box normalization and a relu activation.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv (nn.Module): Convolutional layer module.
+        batch (nn.Module): Batch normalization layer module.
+        relu (nn.Module): ReLU activation layer module.
+        kernel_size (int or tuple): Size of the convolutional kernel.
+        strides (int or tuple): Stride of the convolution.
+        padding (int or tuple): Padding added to the input.
+        bias (bool, optional): Whether to include a bias term in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope coefficient for LeakyReLU activation. Defaults to 0.1.
+    """
+
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+        super().__init__(in_channels, out_channels, conv, batch,
+                         relu, kernel_size, strides, padding, bias, leaky_relu)
+        self.conv = nn.Sequential(
+            SingleBox(in_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu),
+            SingleBox(out_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu),
+        )
+    
+class ResidualBox(SingleBox):
+    """
+    ResidualBox class represents a residual block in a neural network model.
+    It inherits from the SingleBox class.
+    and it has a shortcut layer that is added to the output of the SingleBox layer.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv (torch.nn.Module): Convolutional layer module.
+        batch (torch.nn.Module): Batch normalization module.
+        relu (torch.nn.Module): ReLU activation module.
+        kernel_size (int or tuple): Size of the convolutional kernel.
+        strides (int or tuple): Stride of the convolution.
+        padding (int or tuple): Padding added to the input.
+        bias (bool, optional): Whether to include a bias term in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope of the LeakyReLU activation function. Defaults to 0.1.
+    """
+
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+        super().__init__(in_channels, out_channels, conv, batch,
+                         relu, kernel_size, strides, padding, bias, leaky_relu)
+        self.relu=relu
+        self.leaky_relu=leaky_relu
+        self.shortcut=nn.Sequential(
+            conv(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
+            batch(num_features=out_channels),
+        )
+        
+    def forward(self, x):
+        o=super().forward(x)
+        o+=self.shortcut(x)
+        R=self.relu(self.leaky_relu,inplace=True)
+        return R(o)
+class DoubleBoxResidual(ResidualBox):
+    """
+    A class representing a double residual box in a neural network model.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv: Convolutional layer function.
+        batch: Batch normalization layer function.
+        relu: ReLU activation function.
+        kernel_size: Size of the convolutional kernel.
+        strides: Stride value for the convolution.
+        padding: Padding value for the convolution.
+        bias (bool, optional): Whether to include bias in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope for the LeakyReLU activation function. Defaults to 0.1.
+    """
+
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+        super().__init__(in_channels, out_channels, conv, batch,
+                         relu, kernel_size, strides, padding, bias, leaky_relu)
+
+        self.core = nn.Sequential(
+            SingleBox(in_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu),
+            SingleBox(out_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu),
+        )
+class DoubleBoxParallel(nn.Module):
+    
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+        super().__init__(in_channels, out_channels, conv, batch,
+                         relu, kernel_size, strides, padding, bias, leaky_relu)
+        # cat the output of the two convolutions
+        self.relu=relu
+        self.leaky_relu=leaky_relu
+        self.conv0=SingleBox(in_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu)
+        self.conv1=SingleBox(in_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu)
+    def forward(self, x):
+        return self.relu(self.leaky_relu,torch.cat((self.conv0(x),self.conv1(x)),dim=1))
+class DoubleBoxParallelResnet(ResidualBox):
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+        super().__init__(in_channels, out_channels, conv, batch,
+                         relu, kernel_size, strides, padding, bias, leaky_relu)
+        # cat the output of the two convolutions
+        self.core = DoubleBoxParallel(in_channels, out_channels, conv, batch, relu,
+                      kernel_size, strides, padding, bias, leaky_relu)
+    
+    
+class oldDoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, strides, padding,bias=False,dimensions=2):
+        super(oldDoubleConv, self).__init__()
+        if dimensions==2:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                nn.BatchNorm2d(num_features=out_channels),
+                nn.LeakyReLU(0.1,inplace=True),
+                nn.Conv2d(out_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                nn.BatchNorm2d(num_features=out_channels),
+                nn.LeakyReLU(0.1,inplace=True)
+            )
+        if dimensions==3:
+            self.conv = nn.Sequential(
+                nn.Conv3d(in_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                nn.BatchNorm3d(num_features=out_channels),
+                nn.LeakyReLU(0.1,inplace=True),
+                nn.Conv3d(out_channels, out_channels, kernel_size, strides, padding, bias=bias),
+                nn.BatchNorm3d(num_features=out_channels),
+                nn.LeakyReLU(0.1,inplace=True)
+            )
+
+    def forward(self, x):
+        return self.conv(x)
+class oldEMUNetv2(nn.Module):
+       def __init__(self, in_channels=1, out_channels=1, init_features=32,dimensions=3,number_of_levels=4,batchnorm=False,):
+        super().__init__()
+        if dimensions == 2:
+            self.C = nn.Conv2d
+            self.B = nn.BatchNorm2d
+            self.P = nn.MaxPool2d
+            self.T = nn.ConvTranspose2d
+        elif dimensions == 3:
+            self.C = nn.Conv3d
+            self.B = nn.BatchNorm3d
+            self.P = nn.MaxPool3d
+            self.T = nn.ConvTranspose3d
+
+        features = init_features
+        self.downs = nn.ModuleList()
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.ups = nn.ModuleList()
+        self.bottleneck = oldDoubleConv(features * 8, features * 16)
+        self.output = nn.Conv2d(features, out_channels, kernel_size=1)
+
 
 class EMUNet(nn.Module):
-    def __init__(self, in_channels, out_channels=1, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, resnet=False, batchinbox=False, bias=False):
+    def __init__(self, in_channels, out_channels=1, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, boxtype=SingleBox, batchinbox=False, bias=False):
         self.R = nn.LeakyReLU
         if dimensions == 2:
             self.C = nn.Conv2d
@@ -61,9 +258,7 @@ class EMUNet(nn.Module):
         if not batchinbox:
             self.B = None
 
-        self.box = SingleBox
-        if resnet:
-            self.box = DoubleBox
+        self.box = boxtype
 
         super().__init__()
         self.ups = nn.ModuleList()
@@ -134,16 +329,19 @@ class EMUNet(nn.Module):
             )
 
             self.ups.append(up)
-    def bottleneck(self,x):
+    def bottleneck(self,x,params=None):
         return self.bottleneckNN(x)
     
-    def forward(self, x):
+    def forward(self, x,params=None):
         skip_connections = []
+        #calculate first order statistics from x
+        
+        
         for it, down in enumerate(self.downs):
             x = down(x)
             skip_connections.append(x)
             x = self.pool(x)
-        x = self.bottleneck(x)
+        x = self.bottleneck(x,params=params)
         skip_connections = skip_connections[::-1]
         for i in range(len(self.ups)):
             x = self.ups[i][0](x)  # Pass through ConvTranspose first
@@ -163,32 +361,50 @@ class EMUNet(nn.Module):
     
     
 class EMUnetPlus(EMUNet):
-    def __init__(self, in_channels, out_channels,image_size, nscalars,features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, resnet=False, batchinbox=False, bias=False,):
-        super().__init__(in_channels, out_channels, features, dimensions, kernel_size, padding_size, stride_size, leaky_relu, resnet, batchinbox, bias)
-        self.NDOWN=len(self.downs)*2
-        self.image_size_d=np.prod(np.array([a//self.NDOWN for a in image_size]))
-        initial_parameters=self.image_size_d*features[-1]
-        self.fc = nn.Linear(initial_parameters+ nscalars,initial_parameters ,bias=self.bias)
+    """A subclass of EMUNet that extends its functionality by having the possibility of add some parameters in the bottleneck.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        image_size (tuple): Size of the input image.
+        nscalars (int): Number of scalar parameters.
+        features (list, optional): List of feature maps for each layer. Defaults to [64, 128, 256, 512].
+        dimensions (int, optional): Number of dimensions for the input image. Defaults to 2.
+        kernel_size (int, optional): Size of the convolutional kernel. Defaults to 3.
+        padding_size (int, optional): Size of the padding. Defaults to 1.
+        stride_size (int, optional): Size of the stride. Defaults to 1.
+        leaky_relu (float, optional): Negative slope for LeakyReLU activation. Defaults to 0.1.
+        boxtype (type, optional): Type of bounding box. Defaults to SingleBox.
+        batchinbox (bool, optional): Whether to use batch normalization in the bounding box. Defaults to False.
+        bias (bool, optional): Whether to include bias in the linear layer. Defaults to False.
+    """
+    def __init__(self, in_channels, out_channels, image_size, nscalars, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, boxtype=SingleBox, batchinbox=False, bias=False):
+        super().__init__(in_channels=in_channels, out_channels=out_channels, features=features, dimensions=dimensions, kernel_size=kernel_size, padding_size=padding_size, stride_size=stride_size, leaky_relu=leaky_relu, boxtype=boxtype, batchinbox=batchinbox, bias=bias)
+        self.NDOWN = len(self.downs) * 2
+        self.image_size_d = np.prod(np.array([a // self.NDOWN for a in image_size]))
+        initial_parameters = self.image_size_d * features[-1]
+        self.fc = nn.Linear(initial_parameters + nscalars, initial_parameters, bias=self.bias)
         
-    def bottleneck(self, x,parameters):
-        """_summary_
+    def bottleneck(self, x, parameters):
+        """Perform the bottleneck operation on the input.
 
         Args:
-            x (_type_): the input variable at the bottleneck
-            parameters (_type_): n parwmters to add at the bottleneck
+            x (torch.Tensor): The input variable at the bottleneck.
+            parameters (torch.Tensor): Additional parameters to add at the bottleneck.
 
         Returns:
-            _type_: the classical bottleneck of a cnn
+            torch.Tensor: The output of the bottleneck operation.
         """        
-        O=x.shape
-        x = self.fc(torch.concat((x.view(-1),parameters)))
-        x=x.view(O)
-        return super().bottleneck(x)
+        O = x.shape
+        x = self.fc(torch.cat((x.view(-1), parameters)))
+        x = x.view(O)
+        # the params are already embedded in the x parameter
+        return super().bottleneck(x,params=None)
 
 class EMUnetSegmentation(EMUNet):
-    def forward(self, x):
+    def forward(self, x,params=None):
         S=nn.Softmax(dim=1)
-        x = super().forward(x)
+        x = super().forward(x,params=params)
         return S(x)
 
 
@@ -198,11 +414,68 @@ class EMUnetSegmentationPlus(EMUnetPlus):
         x = super().forward(x,params=params)
         return S(x)
 
+try:
+    import RUNetfeatures
+except:
+    import treno.RUNetfeatures as RUNetfeatures
+class EMRUnet(EMUnetPlus):
+    def __init__(self, in_channels, out_channels, image_size, nscalars, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, boxtype=SingleBox, batchinbox=False,bias=False,version=1):
+        super().__init__(in_channels=in_channels, out_channels=out_channels, features=features, dimensions=dimensions, kernel_size=kernel_size, padding_size=padding_size, stride_size=stride_size, leaky_relu=leaky_relu, boxtype=boxtype, batchinbox=batchinbox, bias=bias,image_size=image_size)
+        numberoffeatures=0
+        self.version=version
+        if version==1:
+            numberoffeatures=20*in_channels
+        else:
+            raise ValueError("Version not implemented")
+        initial_parameters=self.image_size_d*features[-1]
+        self.fc = nn.Linear(initial_parameters+ nscalars+numberoffeatures,initial_parameters ,bias=self.bias)
+    def forward(self, x,params=None):
+        # S=nn.Softmax(dim=1)
+        o=RUNetfeatures.calculate_statistics(x,version=self.version)
+        if params is not None:
+            params=torch.cat((params,o))
+        else:
+            params=o
+        x = super().forward(x,params=params)
+        return x
 
+class EMRUnetSegmentation(EMRUnet):
+    def forward(self, x,params=None):
+        S=nn.Softmax(dim=1)
+        x = super().forward(x,params=params)
+        return S(x)
+class EMRUnetSegmentationDev(EMRUnet):
+    def __init__(self, in_channels, out_channels, image_size, nscalars, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, boxtype=SingleBox, batchinbox=False,bias=False,version=1,roifeatures=False):
+        super().__init__(in_channels=in_channels, out_channels=out_channels, features=features, dimensions=dimensions, kernel_size=kernel_size, padding_size=padding_size, stride_size=stride_size, leaky_relu=leaky_relu, boxtype=boxtype, batchinbox=batchinbox, bias=bias,image_size=image_size)
+        numberoffeatures=0
+        self.version=version
+        # self.roifeatures=roifeatures
+        # self.fc2=None
+        initial_parameters=self.image_size_d*features[-1]
+        
+        if version==1:
+            numberoffeatures=20*in_channels
+            # if roifeatures:
+            #     self.fc2 = nn.Linear(initial_parameters + nscalars, initial_parameters, bias=self.bias)
+        else:
+            raise ValueError("Version not implemented")
+        
+        self.fc = nn.Linear(initial_parameters+ nscalars+numberoffeatures,initial_parameters ,bias=self.bias)
+    def forward(self, x,params=None):
+        S=nn.Softmax(dim=1)
+        o=RUNetfeatures.calculate_statistics(x,version=self.version)
+        if params is not None:
+            params=torch.cat((params,o))
+        else:
+            params=o
+        x = super().forward(x,params=params)
+        
+        return x
+    
 class EMLeNetPlus(EMUnetPlus):
-    def __init__(self, in_channels, out_channels, image_size, nscalars=0, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, resnet=False, batchinbox=False, bias=False,fullyconnectedfeatures=[1024,512]):
-        super().__init__(in_channels, out_channels, image_size, nscalars, features, dimensions, kernel_size, padding_size, stride_size, leaky_relu, resnet, batchinbox, bias)
-        initial_parameters=int(self.image_size_d*features[-1])
+    def __init__(self, in_channels, out_channels, image_size, nscalars=0, features=[64, 128, 256, 512], dimensions=2, kernel_size=3, padding_size=1, stride_size=1, leaky_relu=0.1, resnet=False, parallelbox=False,batchinbox=False, bias=False,fullyconnectedfeatures=[1024,512]):
+        super().__init__(in_channels=in_channels, out_channels=out_channels, features=features, dimensions=dimensions, kernel_size=kernel_size, padding_size=padding_size, stride_size=stride_size, leaky_relu=leaky_relu, boxtype=boxtype, batchinbox=batchinbox, bias=bias,image_size=image_size)
+        initial_parameters=int(self.image_size_d*features[0])
         self.fucon=[]
         self.fuconre=[]
         self.fucon.append(nn.Linear(in_features=initial_parameters, out_features=fullyconnectedfeatures[0]))
@@ -287,12 +560,16 @@ def drawmodel(out,model,fn):
 
 
 if __name__ == "__main__":
-    NC=1
+    NC=2
     IMS=11
     image = torch.randn((1, NC, IMS,IMS))
-    model = EMUnetPlus(in_channels=NC,features=[2,4],out_channels=1, dimensions=2, kernel_size=3,resnet=True,nscalars=2,image_size=(IMS,IMS))
-    out = model(image,torch.from_numpy(np.array([1,2])))
+    model = EMUNet(in_channels=NC,features=[2,4],out_channels=1, dimensions=2, kernel_size=3,resnet=False,image_size=(IMS,IMS),parallelbox=True)
+    model2 = EMRUnetSegmentation(in_channels=NC,features=[2,4],out_channels=1, dimensions=2, kernel_size=3,resnet=True,nscalars=2,image_size=(IMS,IMS),parallelbox=True)
+    out = model(image)
+    out2 = model2(image,torch.from_numpy(np.array([1,2])))
+    
     print(out.shape)
+    print(out2.shape)
     
 
    
