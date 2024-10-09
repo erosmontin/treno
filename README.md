@@ -1,5 +1,14 @@
 # treno
-My architectures
+My DL Architectures
+
+# Installation
+
+```
+python3 -m venv treno
+source treno/bin/activate
+pip install git+https://github.com/erosmontin/treno.git
+
+```
 
 
 

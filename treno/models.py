@@ -1,4 +1,5 @@
-# unet.py file
+#TODO fix resnet skip remove the last relu
+
 
 import numpy as np
 from torch import nn
@@ -26,7 +27,7 @@ class SingleBox(nn.Module):
         leaky_relu (float, optional): Negative slope for the LeakyReLU activation. Defaults to 0.1.
     """
 
-    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1,resenet=False):
         super().__init__()
         if batch is not None:
             # Your code here
@@ -43,42 +44,14 @@ class SingleBox(nn.Module):
                      strides, padding, bias=bias),
                 relu(leaky_relu, inplace=True)
             )
+        if resenet:
+            self.core = nn.Sequential(*list(self.core.children())[:-1])
 
     def forward(self, x):
         return self.core(x)
 
 
 class DoubleBox(SingleBox):
-    """
-    A class representing a double box in a neural network model.
-
-    Inherits from the SingleBox class and extends it by applying two SingleBox layers sequentially.
-    in the and then a box normalization and a relu activation.
-
-    Args:
-        in_channels (int): Number of input channels.
-        out_channels (int): Number of output channels.
-        conv (nn.Module): Convolutional layer module.
-        batch (nn.Module): Batch normalization layer module.
-        relu (nn.Module): ReLU activation layer module.
-        kernel_size (int or tuple): Size of the convolutional kernel.
-        strides (int or tuple): Stride of the convolution.
-        padding (int or tuple): Padding added to the input.
-        bias (bool, optional): Whether to include a bias term in the convolutional layer. Defaults to False.
-        leaky_relu (float, optional): Negative slope coefficient for LeakyReLU activation. Defaults to 0.1.
-    """
-
-    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
-        super().__init__(in_channels, out_channels, conv, batch,
-                         relu, kernel_size, strides, padding, bias, leaky_relu)
-        self.conv = nn.Sequential(
-            SingleBox(in_channels, out_channels, conv, batch, relu,
-                      kernel_size, strides, padding, bias, leaky_relu),
-            SingleBox(in_channels, out_channels, conv, batch, relu,
-                      kernel_size, strides, padding, bias, leaky_relu),
-        )
-
-class DoubleBoxv2(SingleBox):
     """
     A class representing a double box in a neural network model.
     the right version of the double box
@@ -99,14 +72,14 @@ class DoubleBoxv2(SingleBox):
         leaky_relu (float, optional): Negative slope coefficient for LeakyReLU activation. Defaults to 0.1.
     """
 
-    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
+    def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1,resnet=False):
         super().__init__(in_channels, out_channels, conv, batch,
                          relu, kernel_size, strides, padding, bias, leaky_relu)
         self.conv = nn.Sequential(
             SingleBox(in_channels, out_channels, conv, batch, relu,
                       kernel_size, strides, padding, bias, leaky_relu),
             SingleBox(out_channels, out_channels, conv, batch, relu,
-                      kernel_size, strides, padding, bias, leaky_relu),
+                      kernel_size, strides, padding, bias, leaky_relu,resenet=resnet),
         )
     
 class ResidualBox(SingleBox):
@@ -171,7 +144,22 @@ class DoubleBoxResidual(ResidualBox):
                       kernel_size, strides, padding, bias, leaky_relu),
         )
 class DoubleBoxParallel(nn.Module):
-    
+    """
+    A module that performs parallel convolutional operations on input data and concatenates the outputs.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        conv: The convolutional layer to be used.
+        batch: The batch normalization layer to be used.
+        relu: The activation function to be used.
+        kernel_size: The size of the convolutional kernel.
+        strides: The stride of the convolution.
+        padding: The padding applied to the input.
+        bias (bool, optional): Whether to include bias in the convolutional layer. Defaults to False.
+        leaky_relu (float, optional): Negative slope for the LeakyReLU activation function. Defaults to 0.1.
+    """
+
     def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
         super().__init__(in_channels, out_channels, conv, batch,
                          relu, kernel_size, strides, padding, bias, leaky_relu)
@@ -182,7 +170,17 @@ class DoubleBoxParallel(nn.Module):
                       kernel_size, strides, padding, bias, leaky_relu)
         self.conv1=SingleBox(in_channels, out_channels, conv, batch, relu,
                       kernel_size, strides, padding, bias, leaky_relu)
+    
     def forward(self, x):
+        """
+        Forward pass of the DoubleBoxParallel module.
+
+        Args:
+            x: Input tensor.
+
+        Returns:
+            Tensor: Output tensor after applying parallel convolutions and concatenating the results.
+        """
         return self.relu(self.leaky_relu,torch.cat((self.conv0(x),self.conv1(x)),dim=1))
 class DoubleBoxParallelResnet(ResidualBox):
     def __init__(self, in_channels, out_channels, conv, batch, relu, kernel_size, strides, padding, bias=False, leaky_relu=0.1):
