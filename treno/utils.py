@@ -43,3 +43,150 @@ def testPrediction(Ygt, Yhat,labels=None):
         O.append(o)
 
     return O
+
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+
+def zScoreFeartures(features):
+    scaler = StandardScaler()
+    features = pd.DataFrame(scaler.fit_transform(features), columns=features.columns)
+    return features
+
+def filterFeaturesByMAD(features):
+    """
+    Calculate Median Absolute Deviation (MAD) for each feature.
+    Discard features with MAD equal to zero.
+    """
+    mad_values = calculate_df_mad(features)
+    return features.loc[:, mad_values != 0]
+
+
+def calculate_df_mad(df):
+    """
+    Calculate the Median Absolute Deviation (MAD) for each column of the DataFrame.
+    
+    Parameters:
+    df (pd.DataFrame): DataFrame with numerical values
+    
+    Returns:
+    pd.Series: MAD for each column
+    """
+    # Calculate MAD for each column (axis=0)
+    mad = df.apply(lambda x: np.median(np.abs(x - np.median(x))), axis=0)
+    return mad
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelBinarizer
+
+def labelbnarizer(y):
+    lb = LabelBinarizer()
+    y_bin = lb.fit_transform(y)
+    return y_bin
+
+def filterFeaturesByAUC(X, y, feature_cols=None, threshold=0.580,returnAUC=False):
+    """
+    Calculate the AUC-ROC for each feature in a multi-class classification problem and select features with AUC >= threshold.
+    
+    Parameters:
+    X (pd.DataFrame): DataFrame with feature values
+    y (pd.Series): Series with class labels (for a three-class problem)
+    feature_cols (list): List of column names that contain the feature values
+    threshold (float): The AUC threshold for selecting predictive features (default is 0.580)
+
+    Returns:
+    pd.DataFrame: DataFrame with selected features that have AUC >= threshold
+    """
+    selected_features = []
+    auc_scores = []
+
+    if feature_cols is None:
+        feature_cols = X.columns.tolist()
+    # Binarize the output labels for multiclass ROC AUC calculation
+    y_bin=labelbnarizer(y)
+
+    # For multiclass, AUC is calculated in a One-vs-Rest fashion
+    for feature in feature_cols:
+        # Extract the feature column
+        X_feature = X[[feature]]
+        
+        # Split data into train and test sets
+        X_train, X_test, y_train, y_test = train_test_split(X_feature, y, test_size=0.3, random_state=42)
+        
+        # Train a simple classifier (RandomForest)
+        clf = RandomForestClassifier(n_estimators=100, random_state=42)
+        clf.fit(X_train, y_train)
+        
+        # Get prediction probabilities
+        y_prob = clf.predict_proba(X_test)
+        
+        # Compute the AUC-ROC score for each class in a One-vs-Rest approach
+        test_index = y_test.index
+        auc = roc_auc_score(y_bin[test_index], y_prob, multi_class='ovr')
+        
+        auc_scores.append(auc)
+
+        # Select features with AUC >= threshold
+        if auc >= threshold:
+            selected_features.append(feature)
+    
+    # Create a DataFrame with the results
+    results_df = pd.DataFrame({
+        'Feature': feature_cols,
+        'AUC': auc_scores
+    })
+
+    selected_df = results_df[results_df['AUC'] >= threshold].reset_index(drop=True)
+    if returnAUC:
+        return X[selected_df["Feature"]],selected_df["AUC"]
+    else:
+        return X[selected_df["Feature"]]
+
+def filterFeaturesByCorrelation(features, threshold=0.90,prognostic=None):
+    """
+    Remove highly correlated features (correlation coefficient ≥ 0.90).
+    Retain the more prognostic feature from each correlated pair.
+    """
+    if prognostic is None:
+        prognostic = np.ones(features.shape[1])
+    corr_matrix = features.corr().abs()
+    to_drop = set()    
+    for i in range(len(corr_matrix.columns)):
+        for j in range(i):
+            if corr_matrix.iloc[i, j] >= threshold:
+                feature_i = corr_matrix.columns[i]
+                feature_j = corr_matrix.columns[j]
+                # Here you would compare prognostic values and retain the better one
+                if feature_j in to_drop:
+                    continue
+                if feature_j not in to_drop:  # Compare the features to determine which to drop
+                    if prognostic[i] > prognostic[j]:
+                        to_drop.add(feature_j)
+                    else:
+                        to_drop.add(feature_i)
+    for a in to_drop:
+        print(f"Feature {a} is highly correlated and will be removed")
+              
+    return features.drop(columns=to_drop)
+
+
+
+def create_test_data(num_samples=100, num_features=10):
+    # Create a DataFrame with random feature values
+    features = pd.DataFrame(np.random.rand(num_samples, num_features), columns=[f'feature_{i}' for i in range(num_features)])
+    # Create a Series with random target values
+    targets = pd.Series(np.random.randint(0, 3, num_samples))
+    return features, targets
+
+if __name__ == "__main__":
+    
+    features, targets = create_test_data()
+    features.iloc[:,1]=features.iloc[:,0]+2*features.iloc[:,0]
+    features,resultDF=filterFeaturesByAUC(features, targets, feature_cols=None, threshold=0.5)
+    features=filterFeaturesByCorrelation(features, threshold=0.44,prognostic=resultDF["AUC"].values)
+    print(features.columns)
