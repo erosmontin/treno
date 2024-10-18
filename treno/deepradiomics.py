@@ -188,7 +188,19 @@ class DeepRadioNet(nn.Module):
         self.fc3 = nn.Linear(4096, 8192)
         self.softmax = nn.Softmax(dim=1)
     def forward(self, x):
-        # Forward pass through conv layers with pooling
+        # Features extraction
+        x=self.fe(x)
+        x = self.softmax(x)
+        return x
+    
+    def feAndforward(self, x):
+        # Features extraction
+        x=self.fe(x)
+        y = self.softmax(x)
+        return x, y
+    
+    def fe(self, x):
+        # features extraction
         x = self.pool3(self.conv1(x))
         x=self.lrn(x)
         x = self.pool2(self.conv2(x))
@@ -196,112 +208,35 @@ class DeepRadioNet(nn.Module):
         x = self.conv3(x)
         x = self.conv4(x)
         x = self.pool3(self.conv5(x))
-        
-
         # Flatten before fully connected layers
         x = torch.flatten(x, 1)  # Flatten all dimensions except batch
-        
         # Fully connected layers
         x = self.dropout(self.fc1(x))
         x = self.dropout(self.fc2(x))
         x = self.fc3(x)  # Output layer
-        x = self.softmax(x)
         return x
+
 
 class DeepRadioClassifier(nn.Module):
-    """
-    Combines DeepRadioNet with a classification layer for final output.
-    """
-    def __init__(self, num_classes=3):
+    def __init__(self, num_classes, input_size=8192):
         super().__init__()
-        self.classifier = nn.Linear(8192, num_classes)
-    
+        self.layer1 = nn.Sequential(
+            nn.Linear(input_size,input_size//2),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Linear(input_size//2, input_size//4),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+        self.classifier = nn.Linear(input_size//4, num_classes)
+
     def forward(self, x):
-        # Pass through the final classification layer
+        x = self.layer1(x)
+        x = self.layer2(x)
         x = self.classifier(x)
         return x
-    
-# import numpy as np
-# import pandas as pd
-# from scipy.stats import zscore
-# from sklearn.metrics import pairwise_distances
-# from statsmodels.stats.inter_rater import fleiss_kappa
-
-# def evaluate_feature_robustness(features):
-#     """
-#     Evaluate the robustness of features using ICC.
-#     Features with ICC ≥ 0.85 are considered robust.
-#     """
-#     # This is a placeholder for your ICC calculation logic
-#     robust_features = []
-#     for feature in features.columns:
-#         # Calculate ICC here based on test-retest and inter-rater analysis
-#         icc_value = calculate_icc(features[feature])  # Define calculate_icc
-#         if icc_value >= 0.85:
-#             robust_features.append(feature)
-#     return features[robust_features]
-
-# def calculate_mad(features):
-#     """
-#     Calculate Median Absolute Deviation (MAD) for each feature.
-#     Discard features with MAD equal to zero.
-#     """
-#     mad_values = features.mad()
-#     return features.loc[:, mad_values != 0]
-
-# def assess_prognostic_value(features, targets):
-#     """
-#     Assess prognostic value using C-index.
-#     Features with C-index ≥ 0.580 are retained.
-#     """
-#     prognostic_features = []
-#     for feature in features.columns:
-#         c_index = calculate_c_index(features[feature], targets)  # Define calculate_c_index
-#         if c_index >= 0.580:
-#             prognostic_features.append(feature)
-#     return features[prognostic_features]
-
-# def remove_highly_correlated_features(features):
-#     """
-#     Remove highly correlated features (correlation coefficient ≥ 0.90).
-#     Retain the more prognostic feature from each correlated pair.
-#     """
-#     corr_matrix = features.corr().abs()
-#     to_drop = set()
-    
-#     for i in range(len(corr_matrix.columns)):
-#         for j in range(i):
-#             if corr_matrix.iloc[i, j] >= 0.90:
-#                 feature_i = corr_matrix.columns[i]
-#                 feature_j = corr_matrix.columns[j]
-#                 # Here you would compare prognostic values and retain the better one
-#                 if feature_j in to_drop:
-#                     continue
-#                 if feature_j not in to_drop:  # Compare the features to determine which to drop
-#                     # Assume we have some function to compare prognostic values
-#                     if not compare_prognostic_value(feature_i, feature_j):
-#                         to_drop.add(feature_j)
-#                     else:
-#                         to_drop.add(feature_i)
-#     return features.drop(columns=to_drop)
-
-# def feature_selection_pipeline(features, targets):
-#     """
-#     Execute the complete feature selection pipeline.
-#     """
-#     # Step 1: Evaluate feature robustness
-#     robust_features = evaluate_feature_robustness(features)
-
-#     # Step 2: Calculate MAD and remove non-informative features
-#     mad_features = calculate_mad(robust_features)
-
-#     # Step 3: Assess prognostic value
-#     prognostic_features = assess_prognostic_value(mad_features, targets)
-
-#     # Step 4: Remove highly correlated features
-#     final_features = remove_highly_correlated_features(prognostic_features)
-
-#     return final_features
 
 
 if __name__ == "__main__":
@@ -324,22 +259,14 @@ if __name__ == "__main__":
     import numpy as np
     import torch
 
-    # Define the size of the 3D image
-    image_size = (160,320,120)  # Replace with the actual size expected by your network
-
-    # Generate a random 3D array of the specified size
+    
+    image_size = (160,320,120)    
     image = np.random.rand(*image_size).astype(np.float32)
-
-    # Convert the numpy array to a PyTorch tensor
     image_tensor = torch.from_numpy(image)
-
-    # Add an extra dimension for the batch size and move the tensor to the correct device
     image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)
 
     model=DeepRadioNet(3,image_size,nchan=1)
-    # Pass the tensor to the network
     output = model(image_tensor)
-    print(output.shape)
     
     
 #     # Example usage
