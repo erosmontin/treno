@@ -21,6 +21,7 @@ pip install git+https://github.com/erosmontin/treno.git
 
 
 ## Versions
+1. 2.0.0 2025 version
 
 1. 1.0.0 
     - [DeepRadioNet](https://www.nature.com/articles/s41598-017-10649-8/figures/2)
