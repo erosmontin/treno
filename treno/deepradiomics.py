@@ -1,282 +1,475 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-def output_size(input_size, kernel_size, stride, padding, dimension=3):
-    """
-    Calculate the output size of a 2D or 3D convolution layer.
-    works, for 2D and 3D convolutions and pooling layers.
-    
-    Args:
-    input_size (tuple): A tuple representing the size of the input tensor (height, width) for 2D
-                        or (depth, height, width) for 3D.
-    kernel_size (int or tuple): The size of the kernel in each dimension.
-    stride (int or tuple): The stride in each dimension.
-    padding (int or tuple): The padding in each dimension.
-    dimension (int): Either 2 for 2D convolutions or 3 for 3D convolutions.
-
-    Returns:
-    tuple: The size of the output tensor.
-    """
-    if isinstance(kernel_size, int):
-        kernel_size = (kernel_size,) * dimension
-    if isinstance(stride, int):
-        stride = (stride,) * dimension
-    if isinstance(padding, int):
-        padding = (padding,) * dimension
-    
-    # Unpack input size, kernel size, stride, and padding
-    if dimension == 3:
-        depth, height, width = input_size
-        kd, kh, kw = kernel_size
-        sd, sh, sw = stride
-        pd, ph, pw = padding
-
-        # Apply the formula to calculate output dimensions
-        output_depth = math.floor((depth - kd + 2 * pd) / sd) + 1
-        output_height = math.floor((height - kh + 2 * ph) / sh) + 1
-        output_width = math.floor((width - kw + 2 * pw) / sw) + 1
-
-        return (output_depth, output_height, output_width)
-    
-    elif dimension == 2:
-        height, width = input_size
-        kh, kw = kernel_size
-        sh, sw = stride
-        ph, pw = padding
-
-        # Apply the formula to calculate output dimensions
-        output_height = math.floor((height - kh + 2 * ph) / sh) + 1
-        output_width = math.floor((width - kw + 2 * pw) / sw) + 1
-
-        return (output_height, output_width)
-
-    else:
-        
-        raise ValueError("Only 2D or 3D convolutions are supported")
-    
+import numpy as np
 
 def getNdTools(dimension):
+    """Returns appropriate PyTorch modules based on the specified dimension."""
     if dimension == 1:
-        return nn.Conv1d, nn.ConvTranspose1d, nn.AvgPool1d, nn.BatchNorm1d, nn.Dropout1d,nn.ReflectionPad1d
+        return nn.Conv1d, nn.ConvTranspose1d, nn.MaxPool1d, nn.BatchNorm1d, nn.Dropout, nn.ReflectionPad1d
     elif dimension == 2:
-        return nn.Conv2d, nn.ConvTranspose2d,nn.AvgPool2d, nn.BatchNorm2d, nn.Dropout2d,nn.ReflectionPad2d
+        return nn.Conv2d, nn.ConvTranspose2d, nn.MaxPool2d, nn.BatchNorm2d, nn.Dropout2d, nn.ReflectionPad2d
     elif dimension == 3:
-        return nn.Conv3d, nn.ConvTranspose3d, nn.AvgPool3d, nn.BatchNorm3d, nn.Dropout3d,nn.ReflectionPad3d
+        return nn.Conv3d, nn.ConvTranspose3d, nn.MaxPool3d, nn.BatchNorm3d, nn.Dropout3d, nn.ReflectionPad3d
     else:
         raise ValueError("Only 1, 2, or 3 dimensions are supported")
 
+def calculate_skewness_torch(x):
+    mean = torch.mean(x)
+    std_dev = torch.std(x)
+    skewness = torch.mean((x - mean) ** 3) / (std_dev ** 3 + 1e-6)
+    return skewness
 
-# class HybridNormalizationPredictor(nn.Module):
-#     def __init__(self, dimension,metadata_input_size):
-#         super().__init__()
-        
-#         # Convolutional layers for the image input
-#         C, U, P, B, D = getNdTools(dimension)
-        
-#         # Define convolutional and pooling layers according to parameters
-#         conv_params = [{'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'padding': 1}, 
-#                        {'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 1}]
-#         pool_params = [{'kernel_size': 2, 'stride': 2}, {'kernel_size': 2, 'stride': 2}]
-        
-#         self.convs = nn.ModuleList([C(in_channels=conv_params[i]['out_channels'] if i > 0 else 1, **params) 
-#                                     for i, params in enumerate(conv_params)])
-#         self.pools = nn.ModuleList([P(**params) for params in pool_params])
-        
-#         # Calculate the flattened size after the conv layers
-#         volume_size = 64
-#         output_channels = conv_params[-1]['out_channels']
+def calculate_kurtosis_torch(x):
+    mean = torch.mean(x)
+    std_dev = torch.std(x)
+    kurtosis = torch.mean((x - mean) ** 4) / (std_dev ** 4 + 1e-6) - 3
+    return kurtosis
 
-#         self.flatten_size = output_channels * calculate_flattened_size(volume_size, conv_params, pool_params)**3
-        
-#         # Fully connected layers for the metadata (TE, TR, sequence type, etc.)
-#         self.fc_metadata_1 = nn.Linear(metadata_input_size, 16)
-#         self.fc_metadata_2 = nn.Linear(16, 8)
-        
-#         # Combined fully connected layers (image + metadata)
-#         self.fc_combined_1 = nn.Linear(self.flatten_size + 8, 32)
-#         self.fc_combined_2 = nn.Linear(32, 16)
-#         self.fc_output = nn.Linear(16, 1)  # Output normalization value
-        
-#         # Activation function
-#         self.relu = nn.SELU()
-        
+def calculate_fos_features(x, num_bins=256):
+    """Calculate extended first-order statistical features from a tensor."""
+    # Normalize x to [0, 1] range for consistent binning
+    x_min, x_max = torch.min(x), torch.max(x)
+    x_norm = (x - x_min) / (x_max - x_min + 1e-6) if x_max > x_min else x
     
-#     def forward(self, x, metadata):
-#         for conv, pool in zip(self.convs, self.pools):
-#             x = pool(self.relu(conv(x)))
-#         x = x.view(x.size(0), -1)  # Flatten the tensor
+    energy = torch.sum(x**2).item()
+    total_energy = torch.sum(x).item()
+    h = torch.histogram(x_norm.flatten(), bins=num_bins, density=True)[0]
+    h = h[h > 1e-5]
+    entropy = -torch.sum(h * torch.log(h + 1e-6)).item()
+    minimum = torch.min(x).item()
+    tenth_percentile = torch.quantile(x.flatten(), 0.1).item()
+    twenty_fifth_percentile = torch.quantile(x.flatten(), 0.25).item()
+    seventy_fifth_percentile = torch.quantile(x.flatten(), 0.75).item()
+    ninetieth_percentile = torch.quantile(x.flatten(), 0.9).item()
+    maximum = torch.max(x).item()
+    mean = torch.mean(x).item()
+    median = torch.median(x).item()
+    mode = h.argmax().item() / (num_bins - 1)  # Scale mode to [0, 1]
+    interquartile_range = seventy_fifth_percentile - twenty_fifth_percentile
+    range_ = maximum - minimum
+    mad = torch.mean(torch.abs(x - mean)).item()
+    mad_median = torch.mean(torch.abs(x - median)).item()
+    rms = torch.sqrt(torch.mean(x**2)).item()
+    std_dev = torch.std(x).item()
+    variance = torch.var(x).item()
+    skewness = calculate_skewness_torch(x).item()
+    kurtosis = calculate_kurtosis_torch(x).item()
+    unique_elements = torch.unique(x)
+    uniformity = len(unique_elements) / x.numel()
+    cv = std_dev / (mean + 1e-6)
+    diff_entropy = -torch.sum(torch.diff(x.flatten()) * torch.log(torch.abs(torch.diff(x.flatten())) + 1e-6)).item()
 
-#         # Metadata processing through fully connected layers
-#         x_metadata = self.relu(self.fc_metadata_1(metadata))
-#         x_metadata = self.relu(self.fc_metadata_2(x_metadata))
+    return torch.tensor([
+        energy, cv, total_energy, entropy, minimum, tenth_percentile, twenty_fifth_percentile,
+        seventy_fifth_percentile, ninetieth_percentile, maximum, mean, median, mode,
+        interquartile_range, range_, mad, mad_median, rms, std_dev, skewness, kurtosis,
+        variance, uniformity, diff_entropy
+    ])
+
+def calculate_simple_glcm_features(x, radii=[1], dimension=2):
+    """Calculate simplified GLCM-like features for a tensor across multiple radii."""
+    glcm_features = []
+    for radius in radii:
+        if dimension == 1:
+            x_shift = torch.roll(x, shifts=radius, dims=0)
+            x_shift[:radius] = 0  # Padding
+        elif dimension == 2:
+            x_shift = torch.roll(x, shifts=radius, dims=1)
+            x_shift[:, :radius] = 0
+        else:  # 3D
+            x_shift = torch.roll(x, shifts=radius, dims=2)
+            x_shift[:, :, :radius] = 0
         
-#         # Concatenate image features and metadata features
-#         x_combined = torch.cat((x, x_metadata), dim=1)
-        
-#         # Combined fully connected layers
-#         x_combined = self.relu(self.fc_combined_1(x_combined))
-#         x_combined = self.relu(self.fc_combined_2(x_combined))
-        
-#         # Output layer (single normalization value)
-#         output = self.fc_output(x_combined)
-#         return output
+        contrast = torch.mean((x - x_shift) ** 2).item()
+        energy = torch.sum(x**2).item()
+        homogeneity = torch.mean(1 / (1 + torch.abs(x - x_shift))).item()
+        glcm_features.extend([contrast, energy, homogeneity])
     
-def tensor_memory_size(tensor):
-    return tensor.element_size() * tensor.nelement()/1024/1024
+    return torch.tensor(glcm_features)
 
-from functools import reduce
-class DeepRadioNet(nn.Module):
+class BaseConvBlock(nn.Module):
+    # [Unchanged]
+    def __init__(self, in_channels, out_channels, dimension=2, kernel_size=3, stride=1, padding=1,
+                 use_batchnorm=True, activation='leaky_relu', dropout_rate=0.0,
+                 leaky_slope=0.1, bias=False, use_residual=False):
+        super().__init__()
+        ConvNd, _, _, BatchNormNd, DropoutNd, _ = getNdTools(dimension)
+        self.use_residual = use_residual and (in_channels == out_channels) and (stride == 1)
+        
+        layers = [ConvNd(in_channels, out_channels, kernel_size, stride, padding, bias=bias)]
+        if use_batchnorm:
+            layers.append(BatchNormNd(out_channels))
+            
+        if activation == 'leaky_relu':
+            self.act = nn.LeakyReLU(leaky_slope, inplace=True)
+        elif activation == 'relu':
+            self.act = nn.ReLU(inplace=True)
+        elif activation == 'gelu':
+            self.act = nn.GELU()
+        else:
+            self.act = nn.Identity()
+            
+        layers.append(self.act)
+        if dropout_rate > 0:
+            layers.append(DropoutNd(dropout_rate))
+            
+        self.block = nn.Sequential(*layers)
+        
+    def forward(self, x):
+        out = self.block(x)
+        if self.use_residual:
+            out = out + x
+        return out
+
+class UNetBase(nn.Module):
+    # [Unchanged]
+    def __init__(self, in_channels, num_filters=[64, 128, 256, 512], dimension=2,
+                 kernel_size=3, use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False):
+        super().__init__()
+        ConvNd, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
+        self.num_filters = num_filters
+        self.pool = MaxPoolNd(kernel_size=2, stride=2)
+        
+        self.downs = nn.ModuleList()
+        current_channels = in_channels
+        for filters in num_filters:
+            self.downs.append(BaseConvBlock(
+                current_channels, filters, dimension, kernel_size, 1, padding=1,
+                use_batchnorm, activation, dropout_rate, leaky_slope, bias, use_residual
+            ))
+            current_channels = filters
+            
+        self.bottleneck = BaseConvBlock(
+            num_filters[-1], num_filters[-1]*2, dimension, kernel_size, 1, padding=1,
+            use_batchnorm, activation, dropout_rate, leaky_slope, bias, use_residual
+        )
+        
+        self.ups = nn.ModuleList()
+        for filters in reversed(num_filters):
+            self.ups.append(nn.Sequential(
+                ConvTransposeNd(filters*2, filters, kernel_size=2, stride=2),
+                BaseConvBlock(filters*2, filters, dimension, kernel_size, 1, padding=1,
+                            use_batchnorm, activation, dropout_rate, leaky_slope, bias, use_residual)
+            ))
+            
+    def forward_features(self, x):
+        skip_connections = []
+        for down in self.downs:
+            x = down(x)
+            skip_connections.append(x)
+            x = self.pool(x)
+        return x, skip_connections
+    
+    def forward(self, x):
+        x, skip_connections = self.forward_features(x)
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]
+        for i, up in enumerate(self.ups):
+            x = up[0](x)
+            skip = skip_connections[i]
+            if x.shape[2:] != skip.shape[2:]:
+                mode = 'linear' if len(x.shape) == 3 else 'bilinear' if len(x.shape) == 4 else 'trilinear'
+                x = nn.functional.interpolate(x, size=skip.shape[2:], mode=mode, align_corners=False)
+            x = torch.cat([skip, x], dim=1)
+            x = up[1](x)
+        return x
+
+class LeNetBase(nn.Module):
+    # [Unchanged]
+    def __init__(self, in_channels, num_filters=[16, 32, 64], dimension=2,
+                 kernel_size=3, use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False):
+        super().__init__()
+        _, _, MaxPoolNd, _, _, _ = getNdTools(dimension)
+        self.num_filters = num_filters
+        self.pool = MaxPoolNd(kernel_size=2, stride=2)
+        
+        self.convs = nn.ModuleList()
+        current_channels = in_channels
+        for filters in num_filters[:-1]:
+            self.convs.append(BaseConvBlock(
+                current_channels, filters, dimension, kernel_size, 1, padding=1,
+                use_batchnorm, activation, dropout_rate, leaky_slope, bias, use_residual
+            ))
+            current_channels = filters
+            
+    def forward_features(self, x):
+        for conv in self.convs:
+            x = conv(x)
+            x = self.pool(x)
+        return x
+    
+    def forward(self, x):
+        return self.forward_features(x)
+
+class NetworkHead(nn.Module):
+    # [Unchanged]
+    def __init__(self, in_channels, out_channels, dimension=2, task='regression',
+                 fc_layers=[1024, 512], dropout_rate=0.0, activation='leaky_relu',
+                 leaky_slope=0.1, bias=False):
+        super().__init__()
+        ConvNd, _, _, _, _, _ = getNdTools(dimension)
+        self.task = task.lower()
+        self.fc_layers = nn.ModuleList()
+        
+        if self.task == 'segmentation':
+            self.head = ConvNd(in_channels, out_channels, kernel_size=1, bias=bias)
+        else:
+            current_channels = in_channels
+            for fc_size in fc_layers:
+                self.fc_layers.append(nn.Sequential(
+                    nn.Linear(current_channels, fc_size, bias=bias),
+                    self._get_activation(activation, leaky_slope),
+                    nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
+                ))
+                current_channels = fc_size
+            self.fc_layers.append(nn.Linear(current_channels, out_channels, bias=bias))
+            
+    def _get_activation(self, activation, leaky_slope):
+        if activation == 'leaky_relu':
+            return nn.LeakyReLU(leaky_slope, inplace=True)
+        elif activation == 'relu':
+            return nn.ReLU(inplace=True)
+        elif activation == 'gelu':
+            return nn.GELU()
+        return nn.Identity()
+    
+    def forward(self, x):
+        if self.task == 'segmentation':
+            x = self.head(x)
+            return nn.Softmax(dim=1)(x)
+        else:
+            x = torch.flatten(x, 1)
+            for layer in self.fc_layers:
+                x = layer(x)
+            return torch.sigmoid(x) if self.task == 'classification' else x
+
+class EMUNet(nn.Module):
     """
-    DeepRadioNet is a deep learning model for MRI image classification.
-    It consists of five convolutional layers followed by three fully connected layers.
-    #https://www.nature.com/articles/s41598-017-10649-8/figures/2
+    Enhanced Multi-task U-Net architecture with optional radiomics features.
     
-    Author: eros.montin@gmail.com
-    Date: 2024-10-08
-    
-    
-
     Args:
-        nn (_type_): _description_
+        in_channels (int): Number of input channels
+        out_channels (int): Number of output channels
+        dimension (int): Spatial dimension (1, 2, or 3)
+        num_filters (list): List of filter sizes for each layer
+        task (str): Type of task ('regression', 'classification', 'segmentation')
+        use_batchnorm (bool): Whether to use batch normalization
+        activation (str): Type of activation function
+        dropout_rate (float): Dropout probability
+        leaky_slope (float): Slope for LeakyReLU
+        bias (bool): Whether to use bias
+        fc_layers (list): List of fully connected layer sizes (for regression/classification)
+        extra_params_dim (int): Dimension of optional extra parameters
+        use_residual (bool): Whether to use residual connections
+        use_radiomics (bool): Whether to compute radiomics features during extraction
+        num_bins (int): Number of bins for histogram-based features
+        radii (list): List of radii for textural (GLCM) features
     """
-    def __init__(self,dimension,image_size,nchan=1):
-    
+    def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256],
+                 task='regression', use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
+                 extra_params_dim=0, use_residual=False, use_radiomics=False,
+                 num_bins=256, radii=[1]):
         super().__init__()
-        # Convolutional layers
-        C, U, P, B, D,A = getNdTools(dimension)
-        self.conv1 = C(in_channels=nchan, out_channels=96, kernel_size=7, stride=2, padding=0)  # 7x7x7 kernel
-        self.conv2 = C(in_channels=96, out_channels=256, kernel_size=5, stride=1, padding=1)  # 5x5x5 kernel
-        self.conv3 = C(in_channels=256, out_channels=512, kernel_size=3, stride=1, padding=1)  # 3x3x3 kernel
-        self.conv4 = C(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1)  # 3x3x3 kernel
-        self.conv5 = C(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1)  # 3x3x3 kernel
-
-        # Max pooling
-        self.pool3 = P(kernel_size=3, stride=3)
-        self.pool2 = P(kernel_size=2, stride=2)
-        self.lrn = nn.LocalResponseNorm(5)
-        self.dropout = nn.Dropout(0.5)
         
-        # Calculate the size of the output tensor after the conv layers
-        output_size1 = output_size(image_size, 7, 2, 0, dimension)
-        # Calculate the size of the output tensor after the first pooling layer x3
-        output_size2 = output_size(output_size1, 3, 3, 0, dimension)
-
-        # Calculate the size of the output tensor after the second conv layer
-        output_size3 = output_size(output_size2, 5, 1, 1, dimension)
-
-        # Calculate the size of the output tensor after the second pooling layer x2
-        output_size4 = output_size(output_size3, 2, 2, 0, dimension)
-
-        # Calculate the size of the output tensor after the third conv layer
-        output_size5 = output_size(output_size4, 3, 1, 1, dimension)
-
-        # Calculate the size of the output tensor after the fourth conv layer
-        output_size6 = output_size(output_size5, 3, 1, 1, dimension)
-    
-        # Calculate the size of the output tensor after the fifth conv layer
-        output_size7 = output_size(output_size6, 3, 1, 1, dimension)
-    
-        # Calculate the size of the output tensor after the third pooling layer x3
-        output_size8 = output_size(output_size7, 3, 3, 0, dimension)
-    
-        FC=reduce(lambda x, y: x*y, output_size8)
+        self.dimension = dimension
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
+        self.base = UNetBase(
+            in_channels, num_filters, dimension, 3, use_batchnorm,
+            activation, dropout_rate, leaky_slope, bias, use_residual
+        )
         
-        self.fc1 = nn.Linear(FC*512, 4096)
-
-        self.fc2 = nn.Linear(4096, 4096)
-        self.fc3 = nn.Linear(4096, 8192)
-        self.softmax = nn.Softmax(dim=1)
-    def forward(self, x):
-        # Features extraction
-        x=self.fe(x)
-        x = self.softmax(x)
-        return x
+        self.extra_params_dim = extra_params_dim
+        if extra_params_dim > 0:
+            self.param_fc = nn.Linear(extra_params_dim, num_filters[0])
+            
+        self.head = NetworkHead(
+            num_filters[0], out_channels, dimension, task, fc_layers,
+            dropout_rate, activation, leaky_slope, bias
+        )
+        
+    def forward(self, x, extra_params=None):
+        x = self.base(x)
+        
+        if extra_params is not None and self.extra_params_dim > 0:
+            params = self.param_fc(extra_params)
+            params = params.view(x.shape[0], x.shape[1], *[1]*self.dimension)
+            x = x + params
+                
+        return self.head(x)
     
-    def feAndforward(self, x):
-        # Features extraction
-        x=self.fe(x)
-        y = self.softmax(x)
-        return x, y
+    def extract_features(self, x):
+        """
+        Extract features from the encoder path of the U-Net, optionally including radiomics features.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, in_channels, *spatial_dims)
+            
+        Returns:
+            tuple: (bottleneck_features, skip_connections, stats_features)
+                - bottleneck_features (torch.Tensor): Features after the bottleneck
+                - skip_connections (list): List of skip connection tensors from the encoder
+                - stats_features (torch.Tensor or None): Radiomics features (FOS + GLCM) per batch/channel if use_radiomics=True
+        """
+        bottleneck_features, skip_connections = self.base.forward_features(x)
+        bottleneck_features = self.base.bottleneck(bottleneck_features)
+        
+        if self.use_radiomics:
+            stats_features = torch.tensor([])
+            for i in range(x.shape[0]):  # For each batch
+                channelfeatures = torch.tensor([])
+                for j in range(x.shape[1]):  # For each channel
+                    fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                    glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                    combined = torch.cat((fos, glcm))
+                    combined = combined / (torch.max(torch.abs(combined)) + 1e-6)  # Normalize
+                    channelfeatures = torch.cat((channelfeatures, combined))
+                if i == 0:
+                    stats_features = channelfeatures
+                else:
+                    stats_features = torch.vstack((stats_features, channelfeatures))
+        else:
+            stats_features = None
+            
+        return bottleneck_features, skip_connections, stats_features
+
+class EMLeNet(nn.Module):
+    """
+    Enhanced Multi-task LeNet architecture with optional radiomics features.
     
-    def fe(self, x):
-        # features extraction
-        x = self.pool3(self.conv1(x))
-        x=self.lrn(x)
-        x = self.pool2(self.conv2(x))
-        x=self.lrn(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        x = self.pool3(self.conv5(x))
-        # Flatten before fully connected layers
-        x = torch.flatten(x, 1)  # Flatten all dimensions except batch
-        # Fully connected layers
-        x = self.dropout(self.fc1(x))
-        x = self.dropout(self.fc2(x))
-        x = self.fc3(x)  # Output layer
-        return x
-
-
-class DeepRadioClassifier(nn.Module):
-    def __init__(self, num_classes, input_size=8192):
+    Args:
+        in_channels (int): Number of input channels
+        out_channels (int): Number of output channels
+        dimension (int): Spatial dimension (1, 2, or 3)
+        num_filters (list): List of filter sizes for each layer
+        task (str): Type of task ('regression', 'classification', 'segmentation')
+        use_batchnorm (bool): Whether to use batch normalization
+        activation (str): Type of activation function
+        dropout_rate (float): Dropout probability
+        leaky_slope (float): Slope for LeakyReLU
+        bias (bool): Whether to use bias
+        fc_layers (list): List of fully connected layer sizes (for regression/classification)
+        extra_params_dim (int): Dimension of optional extra parameters
+        use_residual (bool): Whether to use residual connections
+        use_radiomics (bool): Whether to compute radiomics features during extraction
+        num_bins (int): Number of bins for histogram-based features
+        radii (list): List of radii for textural (GLCM) features
+    """
+    def __init__(self, in_channels, out_channels, dimension=2, num_filters=[16, 32, 64],
+                 task='regression', use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
+                 extra_params_dim=0, use_residual=False, use_radiomics=False,
+                 num_bins=256, radii=[1]):
         super().__init__()
-        self.layer1 = nn.Sequential(
-            nn.Linear(input_size,input_size//2),
-            nn.ReLU(),
-            nn.Dropout(0.5)
+        
+        self.dimension = dimension
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
+        self.base = LeNetBase(
+            in_channels, num_filters, dimension, 3, use_batchnorm,
+            activation, dropout_rate, leaky_slope, bias, use_residual
         )
-        self.layer2 = nn.Sequential(
-            nn.Linear(input_size//2, input_size//4),
-            nn.ReLU(),
-            nn.Dropout(0.5)
+        
+        self.extra_params_dim = extra_params_dim
+        if extra_params_dim > 0:
+            self.param_fc = nn.Linear(extra_params_dim, num_filters[-2])
+            
+        self.head = NetworkHead(
+            num_filters[-2], out_channels, dimension, task, fc_layers,
+            dropout_rate, activation, leaky_slope, bias
         )
-        self.classifier = nn.Linear(input_size//4, num_classes)
+        
+    def forward(self, x, extra_params=None):
+        x = self.base(x)
+        
+        if extra_params is not None and self.extra_params_dim > 0:
+            params = self.param_fc(extra_params)
+            params = params.view(x.shape[0], -1, *[1]*self.dimension)
+            x = torch.cat([x, params], dim=1)
+                
+        return self.head(x)
+    
+    def extract_features(self, x):
+        """
+        Extract features from the convolutional layers of the LeNet, optionally including radiomics features.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, in_channels, *spatial_dims)
+            
+        Returns:
+            tuple: (conv_features, stats_features)
+                - conv_features (torch.Tensor): Features after the convolutional layers
+                - stats_features (torch.Tensor or None): Radiomics features (FOS + GLCM) per batch/channel if use_radiomics=True
+        """
+        conv_features = self.base.forward_features(x)
+        
+        if self.use_radiomics:
+            stats_features = torch.tensor([])
+            for i in range(x.shape[0]):  # For each batch
+                channelfeatures = torch.tensor([])
+                for j in range(x.shape[1]):  # For each channel
+                    fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                    glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                    combined = torch.cat((fos, glcm))
+                    combined = combined / (torch.max(torch.abs(combined)) + 1e-6)  # Normalize
+                    channelfeatures = torch.cat((channelfeatures, combined))
+                if i == 0:
+                    stats_features = channelfeatures
+                else:
+                    stats_features = torch.vstack((stats_features, channelfeatures))
+        else:
+            stats_features = None
+            
+        return conv_features, stats_features
 
-    def forward(self, x):
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.classifier(x)
-        return x
-
-
+# Example usage
 if __name__ == "__main__":
-
-   	# "MagneticFieldStrength": 3,
-	# "ImagingFrequency": 123.262284,
-	# "Manufacturer": "Siemens",
-	# "ManufacturersModelName": "Prisma_fit",
-	# "PatientPosition": "FFS",
-	# "MRAcquisitionType": "2D",
-	# "ScanningSequence": "SE",
-	# "SAR": 1.42141,
-	# "NumberOfAverages": 2,
-	# "EchoTime": 0.038,
-	# "RepetitionTime": 3.8,
-	# "SpoilingState": true,
-	# "FlipAngle": 120,
-	# "PixelBandwidth": 250,
-	# "DwellTime": 6.2e-06,
-    import numpy as np
-    import torch
-
+    # 1D U-Net with custom radiomics
+    unet_1d = EMUNet(
+        in_channels=2, out_channels=1, dimension=1, num_filters=[32, 64],
+        task='regression', extra_params_dim=3, use_radiomics=True,
+        num_bins=128, radii=[1, 2]
+    )
     
-    image_size = (160,320,120)    
-    image = np.random.rand(*image_size).astype(np.float32)
-    image_tensor = torch.from_numpy(image)
-    image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)
-
-    model=DeepRadioNet(3,image_size,nchan=1)
-    output = model(image_tensor)
+    # 2D LeNet without radiomics
+    lenet_2d = EMLeNet(
+        in_channels=1, out_channels=10, dimension=2, num_filters=[16, 32, 64],
+        task='classification', fc_layers=[512, 256], use_radiomics=False
+    )
     
+    # 3D U-Net with custom radiomics
+    unet_3d = EMUNet(
+        in_channels=3, out_channels=4, dimension=3, num_filters=[32, 64, 128],
+        task='segmentation', use_residual=True, use_radiomics=True,
+        num_bins=64, radii=[1, 3, 5]
+    )
     
-#     # Example usage
-# # Assuming `data` is a DataFrame with features and `target` is the outcome variable
-# data = pd.DataFrame(np.random.rand(100, 1403))  # Example features
-# target = np.random.randint(0, 2, size=(100,))  # Example binary outcome
-
-# # Normalize features as z-scores
-# data_z = data.apply(zscore)
-
-# # Run feature selection pipeline
-# selected_features = feature_selection_pipeline(data_z, target)
-# print(f"Number of selected features: {selected_features.shape[1]}")
+    # Test with random inputs
+    x_1d = torch.randn(2, 2, 128)
+    params = torch.randn(2, 3)
+    out_1d = unet_1d(x_1d, params)
+    features_1d, skip_1d, stats_1d = unet_1d.extract_features(x_1d)
+    print(f"1D Regression output shape: {out_1d.shape}")
+    print(f"1D Extracted bottleneck features shape: {features_1d.shape}")
+    print(f"1D Skip connections: {[s.shape for s in skip_1d]}")
+    print(f"1D Statistical features shape: {stats_1d.shape if stats_1d is not None else 'None'}")
+    
+    x_2d = torch.randn(2, 1, 32, 32)
+    out_2d = lenet_2d(x_2d)
+    features_2d, stats_2d = lenet_2d.extract_features(x_2d)
+    print(f"2D Classification output shape: {out_2d.shape}")
+    print(f"2D Extracted features shape: {features_2d.shape}")
+    print(f"2D Statistical features shape: {stats_2d.shape if stats_2d is not None else 'None'}")
+    
+    x_3d = torch.randn(2, 3, 16, 16, 16)
+    out_3d = unet_3d(x_3d)
+    features_3d, skip_3d, stats_3d = unet_3d.extract_features(x_3d)
+    print(f"3D Segmentation output shape: {out_3d.shape}")
+    print(f"3D Extracted bottleneck features shape: {features_3d.shape}")
+    print(f"3D Skip connections: {[s.shape for s in skip_3d]}")
+    print(f"3D Statistical features shape: {stats_3d.shape if stats_3d is not None else 'None'}")
