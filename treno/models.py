@@ -29,14 +29,15 @@ def calculate_fos_features(x, num_bins=256):
     """Calculate extended first-order statistical features from a tensor."""
     x_min, x_max = torch.min(x), torch.max(x)
     x_norm = (x - x_min) / (x_max - x_min + 1e-6) if x_max > x_min else x
-    
+
     energy = torch.sum(x**2)
     total_energy = torch.sum(x)
-    h = torch.histogram(x_norm.flatten(), bins=num_bins, density=True)[0]
+    # Move x_norm to CPU for histogram computation and move back to original device
+    h = torch.histogram(x_norm.flatten().cpu(), bins=num_bins, density=True)[0].to(x_norm.device)
     h = h[h > 1e-5]
     entropy = -torch.sum(h * torch.log(h + 1e-6))
     minimum = torch.min(x)
-    percentiles = torch.quantile(x.flatten(), torch.tensor([0.1, 0.25, 0.75, 0.9]))
+    percentiles = torch.quantile(x.flatten(), torch.tensor([0.1, 0.25, 0.75, 0.9], device=x.device))
     maximum = torch.max(x)
     mean = torch.mean(x)
     median = torch.median(x)
@@ -55,11 +56,12 @@ def calculate_fos_features(x, num_bins=256):
     cv = std_dev / (mean + 1e-6)
     diff_entropy = -torch.sum(torch.diff(x.flatten()) * torch.log(torch.abs(torch.diff(x.flatten())) + 1e-6))
 
+    # Create the tensor on the same device as x
     return torch.tensor([
-        energy, cv, total_energy, entropy, minimum, *percentiles, maximum, mean, median, mode,
-        interquartile_range, range_, mad, mad_median, rms, std_dev, skewness, kurtosis,
-        variance, uniformity, diff_entropy
-    ])
+        energy, cv, total_energy, entropy, minimum, *percentiles, maximum, mean,
+        median, mode, interquartile_range, range_, mad, mad_median, rms, std_dev,
+        skewness, kurtosis, variance, uniformity, diff_entropy
+    ], device=x.device)
 
 def calculate_simple_glcm_features(x, radii=[1], dimension=2):
     """Calculate simplified GLCM-like features for a tensor across multiple radii."""
@@ -74,13 +76,14 @@ def calculate_simple_glcm_features(x, radii=[1], dimension=2):
         else:  # 3D
             x_shift = torch.roll(x, shifts=radius, dims=2)
             x_shift[:, :, :radius] = 0
-        
+
         contrast = torch.mean((x - x_shift) ** 2)
         energy = torch.sum(x**2)
         homogeneity = torch.mean(1 / (1 + torch.abs(x - x_shift)))
         glcm_features.extend([contrast, energy, homogeneity])
-    
-    return torch.tensor(glcm_features)
+        
+    # Create the tensor on the same device as x
+    return torch.tensor(glcm_features, device=x.device)
 
 class ChannelAttention(nn.Module):
     """Channel attention module for CBAM."""
@@ -142,7 +145,7 @@ class BaseConvBlock(nn.Module):
     """Basic convolutional block with optional attention and residual connections."""
     def __init__(self, in_channels, out_channels, dimension=2, kernel_size=3, stride=1,
                  use_batchnorm=True, activation='leaky_relu', dropout_rate=0.0,
-                 leaky_slope=0.1, bias=False, use_residual=False, use_attention=True):
+                 leaky_slope=0.1, bias=False, use_residual=False, use_attention=True,reduction=16):
         super().__init__()
         
         ConvNd, _, _, BatchNormNd, DropoutNd, ReflectionPadNd = getNdTools(dimension)
@@ -171,7 +174,7 @@ class BaseConvBlock(nn.Module):
             layers.append(DropoutNd(dropout_rate))
             
         if use_attention:
-            layers.append(CBAM(out_channels, dimension))
+            layers.append(CBAM(out_channels, dimension, reduction))
             
         self.block = nn.Sequential(*layers)
         
@@ -186,7 +189,8 @@ class UNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[64, 128, 256, 512], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True):
+                 use_attention=True,reduction=2):
+        
         super().__init__()
         
         ConvNd, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
@@ -199,14 +203,14 @@ class UNetBase(nn.Module):
             self.downs.append(BaseConvBlock(
                 current_channels, filters, dimension, kernel_size, 1,
                 use_batchnorm, activation, dropout_rate, leaky_slope, bias, 
-                use_residual, use_attention
+                use_residual, use_attention, reduction
             ))
             current_channels = filters
             
         self.bottleneck = BaseConvBlock(
             num_filters[-1], num_filters[-1]*2, dimension, kernel_size, 1,
             use_batchnorm, activation, dropout_rate, leaky_slope, bias, 
-            use_residual, use_attention
+            use_residual, use_attention,reduction
         )
         
         self.ups = nn.ModuleList()
@@ -215,7 +219,7 @@ class UNetBase(nn.Module):
                 ConvTransposeNd(filters*2, filters, kernel_size=2, stride=2),
                 BaseConvBlock(filters*2, filters, dimension, kernel_size, 1,
                             use_batchnorm, activation, dropout_rate, leaky_slope, 
-                            bias, use_residual, use_attention)
+                            bias, use_residual, use_attention,reduction)
             ))
             
     def forward_features(self, x):
@@ -246,7 +250,10 @@ class LeNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[16, 32, 64], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True):
+                 use_attention=True,reduction=2):
+        """LeNet base architecture with configurable parameters."""
+        if len(num_filters) < 2:
+            raise ValueError("LeNet requires at least 2 filter sizes")
         super().__init__()
         
         _, _, MaxPoolNd, _, _, _ = getNdTools(dimension)
@@ -259,7 +266,7 @@ class LeNetBase(nn.Module):
             self.convs.append(BaseConvBlock(
                 current_channels, filters, dimension, kernel_size, 1,
                 use_batchnorm, activation, dropout_rate, leaky_slope, bias, 
-                use_residual, use_attention
+                use_residual, use_attention,reduction
             ))
             current_channels = filters
             
@@ -331,17 +338,15 @@ class NetworkHead(nn.Module):
             return torch.sigmoid(x) if self.task == 'classification' else x
         else:  # segmentation
             if radiomics_features is not None and self.radiomics_dim > 0:
-                # Reshape and repeat radiomics features to match spatial dimensions of x
                 radiomics_features = radiomics_features.view(x.shape[0], self.radiomics_dim, *[1]*self.dimension)
                 radiomics_features = radiomics_features.repeat(1, 1, *x.shape[2:])
                 x = torch.cat([x, radiomics_features], dim=1)
             if extra_params is not None and self.extra_params_dim > 0:
-                # Reshape and repeat extra parameters to match spatial dimensions of x
                 extra_params = extra_params.view(x.shape[0], self.extra_params_dim, *[1]*self.dimension)
                 extra_params = extra_params.repeat(1, 1, *x.shape[2:])
                 x = torch.cat([x, extra_params], dim=1)
-            x = self.head(x)
-            return F.softmax(x, dim=1)
+            logits = self.head(x)
+            return logits  # return raw logits for CrossEntropyLoss
 
 class EMUNet(nn.Module):
     """Enhanced Multi-task U-Net architecture with optional radiomics and extra parameters."""
@@ -349,7 +354,7 @@ class EMUNet(nn.Module):
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1]):
+                 use_radiomics=False, num_bins=256, radii=[1],reduction=2):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -365,7 +370,7 @@ class EMUNet(nn.Module):
         self.in_channels = in_channels
         self.base = UNetBase(
             in_channels, num_filters, dimension, 3, use_batchnorm,
-            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention
+            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
         )
         
         radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
@@ -392,7 +397,7 @@ class EMUNet(nn.Module):
             for j in range(self.in_channels):
                 fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
                 glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
-                combined = torch.cat((fos, glcm))
+                combined = torch.cat((fos, glcm),)
                 combined = combined / (torch.max(torch.abs(combined)) + 1e-6)
                 channelfeatures.append(combined)
             stats_features.append(torch.cat(channelfeatures))
@@ -410,7 +415,7 @@ class EMLeNet(nn.Module):
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1]):
+                 use_radiomics=False, num_bins=256, radii=[1],reduction=2):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -426,7 +431,7 @@ class EMLeNet(nn.Module):
         self.in_channels = in_channels
         self.base = LeNetBase(
             in_channels, num_filters, dimension, 3, use_batchnorm,
-            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention
+            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
         )
         
         radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
@@ -496,6 +501,36 @@ if __name__ == "__main__":
                 'fc_layers': [512, 256],
                 'extra_params_dim': 2,  # age, TR
                 'use_radiomics': False
+            },
+            'input': torch.randn(2, 1, 32, 32),
+            'extra': torch.tensor([[40.0, 200.0], [45.0, 250.0]])  # [age, TR]
+        },
+               {
+            'model': EMLeNet,
+            'kwargs': {
+                'in_channels': 1,
+                'out_channels': 10,
+                'dimension': 2,
+                'num_filters': [16, 32, 64],
+                'task': 'classification',
+                'fc_layers': [512, 256],
+                'extra_params_dim': 2,  # age, TR
+                'use_radiomics': True
+            },
+            'input': torch.randn(2, 1, 32, 32),
+            'extra': torch.tensor([[40.0, 200.0], [45.0, 250.0]])  # [age, TR]
+        },
+                          {
+            'model': EMLeNet,
+            'kwargs': {
+                'in_channels': 1,
+                'out_channels': 10,
+                'dimension': 2,
+                'num_filters': [16, 32, 64],
+                'task': 'regression',
+                'fc_layers': [512, 256],
+                'extra_params_dim': 2,  # age, TR
+                'use_radiomics': True
             },
             'input': torch.randn(2, 1, 32, 32),
             'extra': torch.tensor([[40.0, 200.0], [45.0, 250.0]])  # [age, TR]
