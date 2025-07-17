@@ -305,6 +305,47 @@ def create_test_data(num_samples=100, num_features=10):
     targets = pd.Series(np.random.randint(0, 3, num_samples))
     return features, targets
 
+def generate_fake_data(n_samples=100, n_features=20, n_groups=5, classification=True, random_state=None):
+    """
+    Generates fake data for testing feature selection and classification.
+
+    Args:
+        n_samples (int): Number of samples to generate.
+        n_features (int): Number of features to generate.
+        n_groups (int): Number of groups to generate (if grouping is enabled).
+        classification (bool): If True, generates classification labels (0 or 1).
+                               If False, generates regression labels.
+        random_state (int): Seed for random number generation.
+
+    Returns:
+        tuple: A tuple containing:
+            - x (pd.DataFrame): Generated features.
+            - y (pd.Series): Generated labels.
+            - groups (pd.Series or None): Generated groups, or None if n_groups is 0 or None.
+    """
+    if random_state is not None:
+        np.random.seed(random_state)
+
+    # Generate features
+    x = pd.DataFrame(np.random.rand(n_samples, n_features), columns=[f'feature_{i}' for i in range(n_features)])
+
+    # Generate labels
+    if classification:
+        # Generate binary labels
+        y = pd.Series(np.random.randint(0, 2, n_samples), name='label')
+    else:
+        # Generate regression labels based on a simple linear combination of features
+        weights = np.random.rand(n_features)
+        y = pd.Series(np.dot(x, weights) + np.random.randn(n_samples) * 0.5, name='label')
+
+    # Generate groups
+    groups = None
+    if n_groups and n_groups > 0:
+        groups = pd.Series(np.random.randint(0, n_groups, n_samples), name='group')
+
+    return x, y, groups
+
+
 if __name__ == "__main__":
     
     features, targets = create_test_data()
