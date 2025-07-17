@@ -6,14 +6,14 @@ allow-direct-references = true
 
 [project]
 name = "treno"
-version = "2.0.4.9"
+version = "2.0.5.0"
 authors = [
   { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
 ]
 description = "My AI"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["pandas","tqdm","torchviz","torch","numpy","scikit-learn","torchvision","tensorboard","pynico_eros_montin @ git+https://github.com/erosmontin/pynico.git","pyable_eros_montin @ git+https://github.com/erosmontin/pyable.git"]
+dependencies = ["pandas","tqdm","torchviz","torch","numpy","scikit-learn","torchvision","tensorboard","pynico_eros_montin @ git+https://github.com/erosmontin/pynico.git","pyable_eros_montin @ git+https://github.com/erosmontin/pyable.git",imbalanced-learn]
 
 classifiers = [
     "Programming Language :: Python :: 3",

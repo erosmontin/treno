@@ -304,6 +304,107 @@ def generate_fake_data(n_samples=100, n_features=20, n_groups=5, classification=
         groups = pd.Series(np.random.randint(0, n_groups, n_samples), name='group')
     return x, y, groups
 
+
+
+from sklearn.ensemble import RandomForestClassifier
+
+def feature_selection(
+    features,
+    targets,
+    groups=None,
+    score_threshold=0.5,
+    corr_threshold=0.9,
+    score_model=None,
+    score_test_size=0.3,
+    score_n_repeats=1,
+    gini_n_repeats=10,
+    gini_test_size=0.1,
+    gini_random_seed=None,
+    return_gini=False,
+    task="classification"
+):
+    """
+    Feature selection pipeline for classification or regression.
+
+    Parameters:
+        features: DataFrame or ndarray of features
+        targets: Series or ndarray of targets
+        groups: Optional, group labels for splitting
+        score_threshold: Threshold for feature score selection
+        corr_threshold: Correlation threshold for feature removal
+        score_model: scikit-learn model to use for scoring (default: RandomForestClassifier or RandomForestRegressor)
+        score_test_size: Test size for score evaluation
+        score_n_repeats: Number of repeats for score evaluation
+        gini_n_repeats: Number of repeats for Gini ranking
+        gini_test_size: Test size for Gini ranking
+        gini_random_seed: Random seed for Gini ranking
+        return_gini: If True, also return Gini scores
+        task: "classification" or "regression"
+
+    Returns:
+        DataFrame of selected features (optionally sorted by Gini), and optionally Gini scores
+    """
+    # 1. Remove NaNs
+    features, targets = remove_nans(features, targets)
+
+    # 2. Normalize features
+    # features = zScoreFeatures(features)
+
+    # 3. Filter by MAD
+    features = filterFeaturesByMAD(features)
+    if features.shape[1] == 0:
+        raise ValueError("No features passed MAD filter")
+
+    # 4. Filter by score (user-selected model or default)
+    if score_model is not None:
+        model = score_model
+    else:
+        model = RandomForestClassifier() if task == "classification" else RandomForestRegressor()
+    features, score_values = filterFeaturesByScore(
+        features,
+        targets,
+        groups=groups,
+        threshold=score_threshold,
+        return_score=True,
+        model=model,
+        test_size=score_test_size,
+        n_repeats=score_n_repeats
+    )
+    if features.shape[1] == 0:
+        raise ValueError("No features passed score filter")
+
+    # 5. Filter by correlation
+    features = filterFeaturesByCorrelation(
+        features,
+        threshold=corr_threshold,
+        score=score_values.values
+    )
+    if features.shape[1] == 0:
+        raise ValueError("No features passed correlation filter")
+
+    # 6. Rank by repeated Gini index (optional)
+    if return_gini:
+        features_sorted, gini_ranks = rankFeaturesByRepeatedGini(
+            features, targets,
+            n_repeats=gini_n_repeats,
+            test_size=gini_test_size,
+            random_seed=gini_random_seed,
+            groups=groups,
+            return_gini=True
+        )
+        return features_sorted, gini_ranks
+    else:
+        features_sorted = rankFeaturesByRepeatedGini(
+            features, targets,
+            n_repeats=gini_n_repeats,
+            test_size=gini_test_size,
+            random_seed=gini_random_seed,
+            groups=groups,
+            return_gini=False
+        )
+        return features_sorted
+    
+    
 if __name__ == "__main__":
     # Example usage and demonstration
     features, targets = create_test_data()
