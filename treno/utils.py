@@ -238,10 +238,15 @@ def filterFeaturesByAUC(
                     y_prob = y_prob[:, 1]
                     # Ensure y_test is 1D
                     y_test_1d = y_test.values.ravel()
-                    auc = roc_auc_score(y_test_1d, y_prob)
+                    if len(np.unique(y_test_1d)) < 2:
+                        auc = 0.5  # Assign neutral AUC
+                    else:
+                        auc = roc_auc_score(y_test_1d, y_prob)
                 else:
-                     # For multi-class, calculate OvR AUC
-                    auc = roc_auc_score(y_test_bin, y_prob, multi_class=multi_class)
+                    if y_test_bin.shape[1] > 1 and len(np.unique(y_test_bin[:, np.argmax(y_prob, axis=1)])) > 1:
+                        auc = roc_auc_score(y_test_bin, y_prob, multi_class=multi_class)
+                    else:
+                        auc = 0.5
 
             else:
                 # If classifier doesn't have predict_proba, skip AUC for this feature

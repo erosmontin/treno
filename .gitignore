@@ -2,3 +2,4 @@ dist/
 *.whl
 rnn_torchviz.png
 *.pyc
+.vscode/
