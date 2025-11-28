@@ -2,14 +2,16 @@ import torch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix, roc_auc_score, multilabel_confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from pynico_eros_montin import stats as st
 from sklearn.preprocessing import StandardScaler, LabelBinarizer
-from sklearn.model_selection import train_test_split, GroupShuffleSplit
+from sklearn.model_selection import train_test_split, GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.base import is_classifier, is_regressor
 from sklearn.metrics import roc_auc_score, r2_score
 from scipy.stats import pearsonr
+from scipy.signal import convolve2d
 
 def train(model,loss, train_loader,optimizer, epoch,alt_train_loaders=[],writer=None):
     model.train()
@@ -404,6 +406,710 @@ def feature_selection(
             return_gini=False
         )
         return features_sorted
+
+
+# ============================================================================
+# Data Splitting Utilities (Medical Imaging Aware)
+# ============================================================================
+
+def extract_patient_groups(dataframe_index, augmentation_suffix='-aug'):
+    """
+    Extract patient groups from DataFrame index, handling data augmentation.
+    
+    Critical for medical imaging: Ensures augmented samples from the same patient
+    stay in the same split (train or test), preventing data leakage.
+    
+    Parameters:
+        dataframe_index: DataFrame index (can contain augmentation suffixes)
+        augmentation_suffix: Suffix used to mark augmented samples
+        
+    Returns:
+        list: Group labels for each sample
+        
+    Example:
+        >>> index = ['patient_001', 'patient_001-aug', 'patient_002', 'patient_002-aug']
+        >>> groups = extract_patient_groups(index)
+        >>> # groups = [0, 0, 1, 1]  # Same patient = same group
+    """
+    # Get unique patients (without augmentation suffix)
+    unique_patients = [idx for idx in dataframe_index if augmentation_suffix not in str(idx)]
+    
+    groups = []
+    for idx in dataframe_index:
+        # Remove augmentation suffix to get base patient ID
+        base_idx = str(idx).split(augmentation_suffix)[0]
+        
+        # Find group number
+        if base_idx in unique_patients:
+            group_num = unique_patients.index(base_idx)
+        else:
+            # If not found, add it (shouldn't happen normally)
+            unique_patients.append(base_idx)
+            group_num = len(unique_patients) - 1
+            
+        groups.append(group_num)
+    
+    return groups
+
+
+def stratified_group_split(X, y, groups=None, test_size=0.25, random_state=None, 
+                          augmentation_suffix='-aug'):
+    """
+    Stratified train/test split respecting patient groups.
+    
+    **Critical for medical imaging**: Ensures that:
+    1. Patients don't leak between train/test sets
+    2. Augmented samples stay with their original patient
+    3. Class distribution is preserved (stratification)
+    
+    Parameters:
+        X: Features (DataFrame or array)
+        y: Labels (DataFrame or array)
+        groups: Group labels (if None, extracted from X.index)
+        test_size: Fraction of data for testing
+        random_state: Random seed for reproducibility
+        augmentation_suffix: Suffix marking augmented samples
+        
+    Returns:
+        X_train, X_test, y_train, y_test, groups_train, groups_test
+        
+    Example:
+        >>> # DataFrame with patient IDs as index
+        >>> X_train, X_test, y_train, y_test, g_train, g_test = stratified_group_split(
+        ...     X, y, test_size=0.25, random_state=42
+        ... )
+        >>> # No patient appears in both train and test!
+    """
+    # Convert to DataFrame if needed
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X)
+    if not isinstance(y, (pd.DataFrame, pd.Series)):
+        y = pd.Series(y)
+    
+    # Extract groups if not provided
+    if groups is None:
+        groups = extract_patient_groups(X.index, augmentation_suffix)
+    groups = np.array(groups)
+    
+    # Determine number of splits
+    n_splits = int(1 / test_size)
+    
+    # Use StratifiedGroupKFold
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, random_state=random_state, shuffle=True)
+    
+    # Get first split
+    train_idx, test_idx = next(sgkf.split(X, y, groups))
+    
+    # Return splits
+    if isinstance(X, pd.DataFrame):
+        return (X.iloc[train_idx], X.iloc[test_idx], 
+                y.iloc[train_idx], y.iloc[test_idx],
+                groups[train_idx], groups[test_idx])
+    else:
+        return (X[train_idx], X[test_idx],
+                y[train_idx], y[test_idx],
+                groups[train_idx], groups[test_idx])
+
+
+# ============================================================================
+# Additional Evaluation and Visualization Utilities
+# ============================================================================
+
+def compute_metrics(all_labels, all_preds, multilabel=False):
+    """
+    Compute comprehensive classification metrics.
+    
+    Parameters:
+        all_labels (array-like): Ground truth labels
+        all_preds (array-like): Predicted labels
+        multilabel (bool): Whether this is multi-label classification
+    
+    Returns:
+        dict: Dictionary containing accuracy, precision, recall, f1, and confusion matrix
+        
+    Example:
+        >>> metrics = compute_metrics(y_true, y_pred, multilabel=False)
+        >>> print(f"Accuracy: {metrics['accuracy']:.3f}")
+        >>> print(f"F1 Score: {metrics['f1']:.3f}")
+    """
+    if multilabel:
+        accuracy = (all_preds == all_labels).mean()
+        precision = precision_score(all_labels, all_preds, average="micro", zero_division=0)
+        recall = recall_score(all_labels, all_preds, average="micro", zero_division=0)
+        f1 = f1_score(all_labels, all_preds, average="micro", zero_division=0)
+    else:
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision = precision_score(all_labels, all_preds, average="weighted", zero_division=0)
+        recall = recall_score(all_labels, all_preds, average="weighted", zero_division=0)
+        f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
+
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'confusion_matrix': cm
+    }
+
+
+def compute_binary_metrics(y_true, y_pred, eps=1e-6):
+    """
+    Compute comprehensive binary classification metrics including clinical measures.
+    
+    Parameters:
+        y_true (array-like): Ground truth binary labels
+        y_pred (array-like): Predicted binary labels
+        eps (float): Small constant to avoid division by zero
+        
+    Returns:
+        dict: Comprehensive metrics including sensitivity, specificity, MCC, odds ratio, etc.
+        
+    Example:
+        >>> metrics = compute_binary_metrics(y_true, y_pred)
+        >>> print(f"Sensitivity: {metrics['sensitivity']:.3f}")
+        >>> print(f"Odds Ratio: {metrics['odds_ratio']:.3f}")
+        >>> print(f"MCC: {metrics['mcc']:.3f}")
+    """
+    try:
+        from sklearn import metrics as sk_metrics
+        from scipy.stats.contingency import relative_risk, odds_ratio
+    except ImportError:
+        raise ImportError("scipy and sklearn required for compute_binary_metrics")
+    
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred).astype(np.float32)
+    n = cm.sum()
+    
+    # Extract values (note: sklearn confusion matrix is [[TN, FP], [FN, TP]])
+    tn, fp, fn, tp = cm.ravel()
+    
+    # Basic metrics
+    accuracy = (tp + tn) / n
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = 2 * (precision * recall) / (precision + recall + eps)
+    specificity = tn / (tn + fp + eps)
+    sensitivity = tp / (tp + fn + eps)
+    
+    # Matthews Correlation Coefficient
+    mcc = (tp * tn - fp * fn) / (
+        np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)) + eps
+    )
+    
+    # Error rate
+    error_rate = (fp + fn) / n
+    
+    # Relative risk and odds ratio (handle edge cases)
+    try:
+        rr = relative_risk(*cm.astype(int).ravel()).relative_risk
+        if np.isinf(rr):
+            rr = np.nan
+    except:
+        rr = np.nan
+    
+    try:
+        or_val = odds_ratio(cm.astype(int)).statistic
+        if np.isinf(or_val):
+            or_val = np.nan
+    except:
+        or_val = np.nan
+    
+    # AUC and optimal threshold
+    try:
+        auc = sk_metrics.roc_auc_score(y_true, y_pred)
+        fpr, tpr, thresholds = sk_metrics.roc_curve(y_true, y_pred)
+        optimal_idx = np.argmax(tpr - fpr)
+        auc_threshold = thresholds[optimal_idx]
+    except:
+        auc = np.nan
+        auc_threshold = np.nan
+    
+    return {
+        "true_negatives": tn / n,
+        "true_positives": tp / n,
+        "false_negatives": fn / n,
+        "false_positives": fp / n,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "specificity": specificity,
+        "sensitivity": sensitivity,
+        "mcc": mcc,
+        "error_rate": error_rate,
+        "relative_risk": rr,
+        "odds_ratio": or_val,
+        "auc": auc,
+        "auc_threshold": auc_threshold,
+    }
+
+
+def compute_multilabel_sensitivity_specificity(cm):
+    """
+    Compute sensitivity and specificity for each class from confusion matrix.
+    
+    Parameters:
+        cm (np.ndarray): Confusion matrix (2D numpy array)
+    
+    Returns:
+        tuple: (sensitivities, specificities) - lists for each class
+        
+    Example:
+        >>> cm = confusion_matrix(y_true, y_pred)
+        >>> sens, spec = compute_multilabel_sensitivity_specificity(cm)
+        >>> for i, (s, sp) in enumerate(zip(sens, spec)):
+        ...     print(f"Class {i}: Sensitivity={s:.3f}, Specificity={sp:.3f}")
+    """
+    num_classes = cm.shape[0]
+    sensitivities = []
+    specificities = []
+
+    for i in range(num_classes):
+        tp = cm[i, i]
+        fn = np.sum(cm[i, :]) - tp
+        fp = np.sum(cm[:, i]) - tp
+        tn = np.sum(cm) - (tp + fn + fp)
+
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+
+        sensitivities.append(sensitivity)
+        specificities.append(specificity)
+
+    return sensitivities, specificities
+
+
+def visualize_embeddings(feature_vectors, labels, method="tsne", save_path=None):
+    """
+    Visualize feature vectors using dimensionality reduction.
+    
+    Parameters:
+        feature_vectors (list or np.ndarray): Extracted features from model
+        labels (list or np.ndarray): Corresponding labels for each sample
+        method (str): "tsne" or "pca" for dimensionality reduction
+        save_path (str, optional): Path to save the plot
+        
+    Example:
+        >>> # Extract features from your model
+        >>> features = []
+        >>> labels = []
+        >>> for batch_x, batch_y in dataloader:
+        ...     with torch.no_grad():
+        ...         feat = model.extract_features(batch_x)
+        ...     features.append(feat.cpu().numpy())
+        ...     labels.append(batch_y.numpy())
+        >>> visualize_embeddings(features, labels, method="tsne")
+    """
+    try:
+        from sklearn.manifold import TSNE
+        from sklearn.decomposition import PCA
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Warning: sklearn and matplotlib required for visualize_embeddings")
+        return
+
+    feature_vectors = np.vstack(feature_vectors)
+    labels = np.concatenate(labels) if isinstance(labels[0], np.ndarray) else np.array(labels)
+
+    if method == "tsne":
+        reducer = TSNE(n_components=2, perplexity=min(30, len(feature_vectors) - 1), random_state=42)
+    else:
+        reducer = PCA(n_components=2)
+
+    embedded_features = reducer.fit_transform(feature_vectors)
+
+    plt.figure(figsize=(8, 6))
+    scatter = plt.scatter(embedded_features[:, 0], embedded_features[:, 1], 
+                         c=labels, cmap="coolwarm", alpha=0.7)
+    plt.colorbar(scatter, label="Class")
+    plt.title(f"{method.upper()} Visualization of Feature Embeddings")
+    plt.xlabel(f"{method.upper()} Component 1")
+    plt.ylabel(f"{method.upper()} Component 2")
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def write_confusion_matrix_to_tensorboard(writer, cm, min_val, max_val, tag="cm", epoch=0, colormap=None):
+    """
+    Write a confusion matrix to TensorBoard as a colored image.
+    
+    Parameters:
+        writer: TensorBoard SummaryWriter object
+        cm (np.ndarray): Confusion matrix (2D array)
+        min_val (float): Minimum value for normalization
+        max_val (float): Maximum value for normalization
+        tag (str): Tag for the image in TensorBoard
+        epoch (int): Epoch number (step in TensorBoard)
+        colormap: Matplotlib colormap (default: viridis)
+        
+    Example:
+        >>> from torch.utils.tensorboard import SummaryWriter
+        >>> writer = SummaryWriter('runs/experiment')
+        >>> cm = confusion_matrix(y_true, y_pred)
+        >>> write_confusion_matrix_to_tensorboard(writer, cm, 0, cm.max(), epoch=10)
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Warning: matplotlib required for TensorBoard confusion matrix visualization")
+        return
+    
+    if colormap is None:
+        colormap = plt.cm.viridis
+    
+    # Normalize
+    cm_normalized = (cm - min_val) / (max_val - min_val)
+    cm_normalized = np.clip(cm_normalized, 0, 1)
+
+    # Apply colormap
+    cm_colored = colormap(cm_normalized)
+    cm_colored = cm_colored[:, :, :3]  # Remove alpha channel
+
+    # Convert to tensor
+    cm_tensor = torch.tensor(cm_colored, dtype=torch.float32)
+    cm_tensor = cm_tensor.permute(2, 0, 1)  # CHW format
+
+    writer.add_image(tag, cm_tensor, epoch, dataformats="CHW")
+
+
+# ============================================================================
+# Explainability Utilities (Grad-CAM & Saliency Maps)
+# ============================================================================
+
+class GradCAM:
+    """
+    Gradient-weighted Class Activation Mapping (Grad-CAM) for CNNs.
+    
+    Example:
+        >>> model = EMUNet(in_channels=1, out_channels=3)
+        >>> gradcam = GradCAM(model, target_layer=model.encoder[-1])
+        >>> 
+        >>> # Forward pass with target class
+        >>> cam = gradcam(input_tensor, target_class=1)
+        >>> 
+        >>> # Upsample to input size
+        >>> cam_upsampled = gradcam.upsample_cam(cam, input_tensor.shape[-3:])
+    """
+    def __init__(self, model, target_layer):
+        """
+        Initialize Grad-CAM.
+        
+        Parameters:
+            model: PyTorch model
+            target_layer: The layer to compute CAM from (typically last conv layer)
+        """
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        
+        # Register hooks
+        self.forward_handle = target_layer.register_forward_hook(self._forward_hook)
+        self.backward_handle = target_layer.register_full_backward_hook(self._backward_hook)
+    
+    def _forward_hook(self, module, input, output):
+        """Capture forward activations."""
+        self.activations = output.detach()
+    
+    def _backward_hook(self, module, grad_input, grad_output):
+        """Capture backward gradients."""
+        self.gradients = grad_output[0].detach()
+    
+    def __call__(self, input_tensor, target_class=None, normalize=True):
+        """
+        Generate Grad-CAM heatmap.
+        
+        Parameters:
+            input_tensor: Input tensor (B, C, D, H, W) or (B, C, H, W)
+            target_class: Target class index (if None, uses predicted class)
+            normalize: Whether to normalize CAM to [0, 1]
+            
+        Returns:
+            cam: Grad-CAM heatmap (D, H, W) or (H, W)
+        """
+        self.model.eval()
+        input_tensor.requires_grad = True
+        
+        # Forward pass
+        self.model.zero_grad()
+        output = self.model(input_tensor)
+        
+        # Get target class
+        if target_class is None:
+            target_class = output.argmax(dim=1).item()
+        
+        # Backward pass
+        score = output[0, target_class]
+        score.backward()
+        
+        # Compute CAM
+        if self.gradients is None or self.activations is None:
+            raise RuntimeError("Gradients or activations not captured. Check target layer.")
+        
+        # Global average pooling of gradients
+        weights = self.gradients.mean(dim=tuple(range(2, self.gradients.ndim)))  # (B, C)
+        
+        # Weighted combination of activation maps
+        cam = torch.zeros(self.activations.shape[2:], device=self.activations.device)
+        for i, w in enumerate(weights[0]):
+            cam += w * self.activations[0, i]
+        
+        # Apply ReLU (only positive influences)
+        cam = torch.relu(cam)
+        
+        # Normalize
+        if normalize and cam.max() > 0:
+            cam = cam / cam.max()
+        
+        return cam.cpu().numpy()
+    
+    def upsample_cam(self, cam, target_size, mode='trilinear'):
+        """
+        Upsample CAM to target size.
+        
+        Parameters:
+            cam: CAM array (D, H, W) or (H, W)
+            target_size: Target spatial dimensions
+            mode: Interpolation mode ('trilinear' for 3D, 'bilinear' for 2D)
+            
+        Returns:
+            Upsampled CAM as numpy array
+        """
+        import torch.nn.functional as F
+        
+        cam_tensor = torch.from_numpy(cam).unsqueeze(0).unsqueeze(0)  # (1, 1, ...)
+        
+        if len(target_size) == 3:
+            upsampled = F.interpolate(cam_tensor, size=target_size, 
+                                     mode='trilinear', align_corners=False)
+        elif len(target_size) == 2:
+            upsampled = F.interpolate(cam_tensor, size=target_size, 
+                                     mode='bilinear', align_corners=False)
+        else:
+            raise ValueError(f"Unsupported target size: {target_size}")
+        
+        return upsampled.squeeze().numpy()
+    
+    def remove_hooks(self):
+        """Remove registered hooks."""
+        self.forward_handle.remove()
+        self.backward_handle.remove()
+    
+    def __del__(self):
+        """Cleanup hooks on deletion."""
+        try:
+            self.remove_hooks()
+        except:
+            pass
+
+
+def compute_saliency_map(model, input_tensor, target_class=None, smooth=True, smooth_size=3):
+    """
+    Compute saliency map using input gradients.
+    
+    Parameters:
+        model: PyTorch model
+        input_tensor: Input tensor (B, C, D, H, W) or (B, C, H, W)
+        target_class: Target class index (if None, uses predicted class)
+        smooth: Whether to apply smoothing filter
+        smooth_size: Size of smoothing kernel
+        
+    Returns:
+        saliency: Saliency map as numpy array
+        
+    Example:
+        >>> model = EMUNet(in_channels=1, out_channels=3)
+        >>> saliency = compute_saliency_map(model, input_tensor, target_class=1)
+        >>> # Apply mask to focus on brain region
+        >>> saliency[brain_mask == 0] = 0
+    """
+    try:
+        from scipy.ndimage import uniform_filter
+    except ImportError:
+        uniform_filter = None
+    
+    model.eval()
+    input_tensor.requires_grad = True
+    
+    # Forward pass
+    model.zero_grad()
+    output = model(input_tensor)
+    
+    # Get target class
+    if target_class is None:
+        target_class = output.argmax(dim=1).item()
+    
+    # Backward pass
+    score = output[0, target_class]
+    score.backward()
+    
+    # Get gradients
+    gradients = input_tensor.grad.cpu().detach().numpy()
+    
+    # Take absolute value and remove batch/channel dims
+    saliency = np.abs(gradients[0, 0])  # Assuming single channel
+    
+    # Smooth if requested
+    if smooth and uniform_filter is not None:
+        saliency = uniform_filter(saliency, size=smooth_size)
+    
+    return saliency
+
+
+def postprocess_cam(cam, mask=None, smooth=True, smooth_size=3, normalize=True):
+    """
+    Post-process CAM/saliency maps with smoothing, masking, and normalization.
+    
+    Parameters:
+        cam: CAM or saliency array
+        mask: Binary mask to apply (e.g., brain mask)
+        smooth: Whether to apply smoothing
+        smooth_size: Smoothing kernel size
+        normalize: Whether to normalize to [0, 1]
+        
+    Returns:
+        Processed CAM array
+        
+    Example:
+        >>> cam = gradcam(input_tensor, target_class=1)
+        >>> cam_upsampled = gradcam.upsample_cam(cam, input_tensor.shape[-3:])
+        >>> cam_final = postprocess_cam(cam_upsampled, mask=brain_mask, smooth=True)
+    """
+    cam_processed = cam.copy()
+    
+    # Smooth BEFORE masking to avoid edge artifacts
+    if smooth:
+        try:
+            from scipy.ndimage import uniform_filter
+            cam_processed = uniform_filter(cam_processed, size=smooth_size)
+        except ImportError:
+            pass
+    
+    # Normalize BEFORE masking so relative values are preserved
+    if normalize and cam_processed.max() > 0:
+        cam_processed = (cam_processed - cam_processed.min()) / (cam_processed.max() - cam_processed.min())
+    
+    # Apply mask LAST to preserve relative intensities
+    if mask is not None:
+        cam_processed = cam_processed * mask
+    
+    return cam_processed
+
+
+# ============================================================================
+# Medical Imaging Utilities
+# ============================================================================
+
+def resize_image(arr, target_size):
+    """
+    Crop or pad a 2D or 3D array to the target size.
+    
+    Parameters:
+        arr (np.ndarray): Input array (2D or 3D)
+        target_size (tuple): Target size (H, W) for 2D or (H, W, D) for 3D
+        
+    Returns:
+        np.ndarray: Cropped or padded array
+        
+    Example:
+        >>> img = np.random.rand(100, 100, 50)
+        >>> resized = resize_image(img, (128, 128, 64))
+        >>> print(resized.shape)  # (128, 128, 64)
+    """
+    arr = np.asarray(arr)
+    current_size = arr.shape
+    padded_array = np.zeros(target_size, dtype=arr.dtype)
+    
+    def crop_or_pad_dims(curr, targ):
+        return max((curr - targ) // 2, 0), max((targ - curr) // 2, 0)
+    
+    if len(current_size) == 2:
+        crop_y, pad_y = crop_or_pad_dims(current_size[0], target_size[0])
+        crop_x, pad_x = crop_or_pad_dims(current_size[1], target_size[1])
+        
+        cropped = arr[crop_y:crop_y + min(current_size[0], target_size[0]),
+                      crop_x:crop_x + min(current_size[1], target_size[1])]
+        padded_array[pad_y:pad_y + cropped.shape[0], pad_x:pad_x + cropped.shape[1]] = cropped
+
+    elif len(current_size) == 3:
+        crop_y, pad_y = crop_or_pad_dims(current_size[0], target_size[0])
+        crop_x, pad_x = crop_or_pad_dims(current_size[1], target_size[1])
+        crop_depth, pad_depth = crop_or_pad_dims(current_size[2], target_size[2])
+        
+        cropped = arr[crop_y:crop_y + min(current_size[0], target_size[0]),
+                      crop_x:crop_x + min(current_size[1], target_size[1]), 
+                      crop_depth:crop_depth + min(current_size[2], target_size[2])]
+        padded_array[pad_y:pad_y + cropped.shape[0], 
+                     pad_x:pad_x + cropped.shape[1], 
+                     pad_depth:pad_depth + cropped.shape[2]] = cropped
+    else:
+        raise ValueError("Input array must be 2D or 3D.")
+    
+    return padded_array
+
+
+def store_3d_array(im, image_data):
+    """
+    Extract a block from source 3D array that maximizes nonzero pixels.
+    Uses intelligent cropping to select the most informative region.
+    
+    Parameters:
+        im (np.ndarray): Source 3D array of shape (src_h, src_w, src_d)
+        image_data (np.ndarray): Target 3D array defining desired output shape
+            
+    Returns:
+        np.ndarray: Array of shape image_data.shape containing selected data
+        
+    Example:
+        >>> source = np.random.rand(200, 200, 100)
+        >>> target = np.zeros((128, 128, 64))
+        >>> result = store_3d_array(source, target)
+        >>> print(result.shape)  # (128, 128, 64)
+    """
+    target_h, target_w, target_d = image_data.shape
+    src_h, src_w, src_d = im.shape
+
+    # Handle depth dimension
+    if src_d >= target_d:
+        im_eff = im[:, :, src_d - target_d:]
+        d_eff = target_d
+    else:
+        im_eff = im.copy()
+        d_eff = src_d
+
+    # Extract spatial block with most nonzero pixels
+    if im_eff.shape[0] >= target_h and im_eff.shape[1] >= target_w:
+        mask = (im_eff != 0).astype(np.int32)
+        mask2d = mask.sum(axis=2)
+        
+        kernel = np.ones((target_h, target_w), dtype=np.int32)
+        conv_result = convolve2d(mask2d, kernel, mode='valid')
+        
+        i0, j0 = np.unravel_index(np.argmax(conv_result), conv_result.shape)
+        block = im_eff[i0:i0+target_h, j0:j0+target_w, :d_eff]
+    else:
+        block = np.zeros((target_h, target_w, d_eff), dtype=im.dtype)
+        copy_h = min(im_eff.shape[0], target_h)
+        copy_w = min(im_eff.shape[1], target_w)
+        offset_h = (target_h - copy_h) // 2
+        offset_w = (target_w - copy_w) // 2
+        block[offset_h:offset_h+copy_h, offset_w:offset_w+copy_w, :] = im_eff[:copy_h, :copy_w, :d_eff]
+    
+    # Ensure correct depth
+    if d_eff < target_d:
+        final_block = np.zeros((target_h, target_w, target_d), dtype=im.dtype)
+        final_block[:, :, :d_eff] = block
+    else:
+        final_block = block
+
+    return final_block
     
     
 if __name__ == "__main__":

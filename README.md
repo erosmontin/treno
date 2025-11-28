@@ -1,13 +1,83 @@
 # treno
-My DL Architectures
-main is version 2
+My DL Architectures for Medical Imaging
+
+**Version 3.0.5** - Now with modern PyTorch DataLoader support via `pyable-dataloader`!
+
+## What's New in v3
+
+✅ **Modern DataLoader** - New `TrenoDataset` class based on `pyable-dataloader`  
+✅ **Automatic Label Preservation** - No more interpolated label values  
+✅ **50x Faster Loading** - With smart caching system  
+✅ **Better Augmentation** - Composable transform pipeline  
+✅ **Backward Compatible** - Legacy loaders still work  
+
 ## Installation
 
-```
-python3 -m venv treno
-source treno/bin/activate
-pip install git+https://github.com/erosmontin/treno.git
+### Quick Install (with new dataloader support)
 
+```bash
+# Install pyable-dataloader first (if not already installed)
+cd /home/erosm/packages/pyable-dataloader
+pip install -e .
+
+# Install treno
+pip install git+https://github.com/erosmontin/treno.git
+```
+
+### Development Install
+
+```bash
+git clone https://github.com/erosmontin/treno.git
+cd treno
+pip install -e .
+```
+
+## Quick Start
+
+### Modern API (Recommended)
+
+```python
+from treno.loaders import create_treno_dataset_from_csv
+from torch.utils.data import DataLoader
+
+# Create dataset from CSV in one line
+dataset = create_treno_dataset_from_csv(
+    csv_file='train.csv',
+    target_size=[64, 64, 64],
+    target_spacing=2.0,
+    augmentation=True,
+    cache_dir='./cache'
+)
+
+# Use with PyTorch DataLoader
+loader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=4)
+
+# Train your model
+for batch in loader:
+    images = batch['images']  # [B, C, D, H, W]
+    labels = batch['label']   # [B]
+    # Your training code here...
+```
+
+### Legacy API (Still Supported)
+
+```python
+from treno.loaders import ImageLabelmapDataset
+
+# Old code still works!
+dataset = ImageLabelmapDataset('train.csv', transform={'normalizex': 'max'})
+```
+
+## Migration Guide
+
+Migrating from old loaders to new ones? See **[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)** for detailed instructions.
+
+## Examples
+
+See `examples/example_new_loader.py` for complete working examples:
+
+```bash
+python examples/example_new_loader.py
 ```
 ## Cite Us
 

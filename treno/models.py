@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 
 def getNdTools(dimension):
     """Returns appropriate PyTorch modules based on the specified dimension."""
@@ -280,7 +281,27 @@ class LeNetBase(nn.Module):
         return self.forward_features(x)
 
 class NetworkHead(nn.Module):
-    """Configurable network head for different tasks with optional radiomics and extra parameters."""
+    """
+    Configurable network head for different tasks with optional radiomics and extra parameters.
+    
+    Output behavior by task:
+        - 'segmentation': Returns raw logits (no activation) for use with CrossEntropyLoss
+        - 'classification': Returns sigmoid-activated probabilities for binary/multi-label tasks
+        - 'regression': Returns raw outputs (no activation)
+    
+    Args:
+        in_channels: Number of input channels from backbone
+        out_channels: Number of output channels/classes
+        dimension: Spatial dimension (1, 2, or 3)
+        task: One of 'regression', 'classification', or 'segmentation'
+        fc_layers: List of hidden layer sizes for regression/classification
+        dropout_rate: Dropout probability
+        activation: Activation function name
+        leaky_slope: Negative slope for LeakyReLU
+        bias: Whether to use bias in conv/linear layers
+        radiomics_dim: Dimension of radiomics features (0 to disable)
+        extra_params_dim: Dimension of extra parameters like age, TR, TE (0 to disable)
+    """
     def __init__(self, in_channels, out_channels, dimension=2, task='regression',
                  fc_layers=[1024, 512], dropout_rate=0.0, activation='leaky_relu',
                  leaky_slope=0.1, bias=False, radiomics_dim=0, extra_params_dim=0):
@@ -349,7 +370,32 @@ class NetworkHead(nn.Module):
             return logits  # return raw logits for CrossEntropyLoss
 
 class EMUNet(nn.Module):
-    """Enhanced Multi-task U-Net architecture with optional radiomics and extra parameters."""
+    """
+    Enhanced Multi-task U-Net architecture with optional radiomics and extra parameters.
+    
+    Compatible with pyable-dataloader TrenoDataset output format.
+    
+    Example:
+        >>> from treno.loaders import TrenoDataset
+        >>> from treno.models import EMUNet
+        >>> 
+        >>> # Create dataset
+        >>> dataset = TrenoDataset(manifest='data.json', target_size=[64, 64, 64])
+        >>> 
+        >>> # Create model
+        >>> model = EMUNet(
+        ...     in_channels=1,
+        ...     out_channels=4,
+        ...     dimension=3,
+        ...     task='segmentation',
+        ...     use_radiomics=True,
+        ...     extra_params_dim=3  # e.g., age, TR, TE
+        ... )
+        >>> 
+        >>> # Forward pass
+        >>> batch = dataset[0]
+        >>> output = model(batch['images'], extra_params=batch.get('aux_data'))
+    """
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256],
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
@@ -368,6 +414,7 @@ class EMUNet(nn.Module):
         self.radii = radii
         self.extra_params_dim = extra_params_dim
         self.in_channels = in_channels
+        self.task = task
         self.base = UNetBase(
             in_channels, num_filters, dimension, 3, use_batchnorm,
             activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
@@ -381,6 +428,18 @@ class EMUNet(nn.Module):
         )
         
     def forward(self, x, extra_params=None):
+        # Validate input dimensions
+        expected_dims = self.dimension + 2  # +2 for batch and channel
+        if x.dim() != expected_dims:
+            raise ValueError(
+                f"Expected {self.dimension}D input with shape [B, C, "
+                f"{'D, ' if self.dimension == 3 else ''}H, W], got shape {x.shape}"
+            )
+        if x.shape[1] != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channels, got {x.shape[1]}"
+            )
+        
         radiomics_features = None
         if self.use_radiomics:
             radiomics_features = self._compute_radiomics(x)
@@ -391,14 +450,19 @@ class EMUNet(nn.Module):
         return self.head(x, radiomics_features, extra_params)
     
     def _compute_radiomics(self, x):
+        """
+        Compute radiomics features (FOS + GLCM) for each channel.
+        Features are standardized per sample for stability.
+        """
         stats_features = []
         for i in range(x.shape[0]):
             channelfeatures = []
             for j in range(self.in_channels):
                 fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
                 glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
-                combined = torch.cat((fos, glcm),)
-                combined = combined / (torch.max(torch.abs(combined)) + 1e-6)
+                combined = torch.cat((fos, glcm))
+                # Standardize features for better numerical stability
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
                 channelfeatures.append(combined)
             stats_features.append(torch.cat(channelfeatures))
         return torch.stack(stats_features)
@@ -410,7 +474,31 @@ class EMUNet(nn.Module):
         return bottleneck_features, skip_connections, radiomics_features
 
 class EMLeNet(nn.Module):
-    """Enhanced Multi-task LeNet architecture with optional radiomics and extra parameters."""
+    """
+    Enhanced Multi-task LeNet architecture with optional radiomics and extra parameters.
+    
+    Compatible with pyable-dataloader TrenoDataset output format.
+    
+    Example:
+        >>> from treno.loaders import TrenoDataset
+        >>> from treno.models import EMLeNet
+        >>> 
+        >>> # Create dataset
+        >>> dataset = TrenoDataset(manifest='data.json', target_size=[32, 32])
+        >>> 
+        >>> # Create model for classification
+        >>> model = EMLeNet(
+        ...     in_channels=1,
+        ...     out_channels=10,
+        ...     dimension=2,
+        ...     task='classification',
+        ...     use_radiomics=True
+        ... )
+        >>> 
+        >>> # Forward pass
+        >>> batch = dataset[0]
+        >>> output = model(batch['images'])
+    """
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[16, 32, 64],
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
@@ -468,6 +556,328 @@ class EMLeNet(nn.Module):
         conv_features = self.base.forward_features(x)
         radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
         return conv_features, radiomics_features
+
+# ============================================================================
+# TRAINING UTILITIES
+# ============================================================================
+
+class EarlyStopping:
+    """
+    Early stopping to stop training when validation loss doesn't improve.
+    
+    Args:
+        patience: How many epochs to wait after last improvement
+        verbose: Whether to print messages
+        delta: Minimum change to qualify as improvement
+        path: Path to save checkpoint
+        
+    Example:
+        >>> early_stopping = EarlyStopping(patience=7, verbose=True)
+        >>> 
+        >>> for epoch in range(num_epochs):
+        ...     train_loss = train_one_epoch(model, train_loader)
+        ...     val_loss = validate(model, val_loader)
+        ...     
+        ...     early_stopping(val_loss, model)
+        ...     if early_stopping.early_stop:
+        ...         print("Early stopping triggered")
+        ...         break
+    """
+    def __init__(self, patience=7, verbose=False, delta=0, path='checkpoint.pt'):
+        self.patience = patience
+        self.verbose = verbose
+        self.delta = delta
+        self.path = path
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = float('inf')
+
+    def __call__(self, val_loss, model):
+        score = -val_loss  # Higher score = better
+
+        if self.best_score is None:
+            # First validation step
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+        elif score > self.best_score + self.delta:
+            # Significant improvement
+            self.best_score = score
+            self.save_checkpoint(val_loss, model)
+            self.counter = 0
+        else:
+            # No improvement
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter}/{self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+    def save_checkpoint(self, val_loss, model):
+        """Save model when validation loss improves."""
+        if self.verbose:
+            print(f'Validation loss improved ({self.val_loss_min:.4f} → {val_loss:.4f}). Saving model...')
+        torch.save(model.state_dict(), self.path)
+        self.val_loss_min = val_loss
+
+
+class ModelCheckpoint:
+    """
+    Save model checkpoints with epoch and training information.
+    
+    Args:
+        save_dir: Directory to save checkpoints
+        monitor: Metric to monitor ('val_loss' or 'val_acc')
+        mode: 'min' or 'max' (whether lower or higher is better)
+        save_best_only: Only save when metric improves
+        
+    Example:
+        >>> checkpoint = ModelCheckpoint(save_dir='./checkpoints', monitor='val_loss')
+        >>> 
+        >>> for epoch in range(num_epochs):
+        ...     train_loss = train_one_epoch(model, train_loader)
+        ...     val_loss = validate(model, val_loader)
+        ...     
+        ...     checkpoint.save(model, optimizer, epoch, val_loss)
+    """
+    def __init__(self, save_dir='./checkpoints', monitor='val_loss', mode='min', save_best_only=True):
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.monitor = monitor
+        self.mode = mode
+        self.save_best_only = save_best_only
+        self.best_metric = float('inf') if mode == 'min' else float('-inf')
+        
+    def save(self, model, optimizer, epoch, metrics, filename=None):
+        """
+        Save model checkpoint.
+        
+        Args:
+            model: PyTorch model
+            optimizer: PyTorch optimizer
+            epoch: Current epoch number
+            metrics: Dict of metrics (e.g., {'val_loss': 0.5, 'val_acc': 0.9})
+            filename: Optional custom filename
+        """
+        metric_value = metrics.get(self.monitor, None)
+        
+        if metric_value is None:
+            print(f"Warning: Metric '{self.monitor}' not found in metrics dict")
+            return
+        
+        is_best = False
+        if self.mode == 'min':
+            is_best = metric_value < self.best_metric
+        else:
+            is_best = metric_value > self.best_metric
+            
+        if is_best:
+            self.best_metric = metric_value
+            
+        if not self.save_best_only or is_best:
+            if filename is None:
+                filename = f'checkpoint_epoch_{epoch:03d}.pt'
+            
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'metrics': metrics,
+                'best_metric': self.best_metric
+            }
+            
+            save_path = self.save_dir / filename
+            torch.save(checkpoint, save_path)
+            
+            if is_best:
+                # Also save as best model
+                best_path = self.save_dir / 'best_model.pt'
+                torch.save(checkpoint, best_path)
+                print(f'✓ New best {self.monitor}: {metric_value:.4f} (saved to {best_path})')
+
+
+def save_model(model, path):
+    """Save model state dict."""
+    torch.save(model.state_dict(), path)
+    print(f"✓ Model saved to {path}")
+
+
+def load_model(model, path, device='cpu'):
+    """
+    Load model state dict.
+    
+    Args:
+        model: Model instance to load weights into
+        path: Path to saved state dict
+        device: Device to load model on
+        
+    Returns:
+        Model with loaded weights
+    """
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.eval()
+    print(f"✓ Model loaded from {path}")
+    return model
+
+
+def save_checkpoint(model, optimizer, epoch, loss, path):
+    """
+    Save complete training checkpoint.
+    
+    Args:
+        model: PyTorch model
+        optimizer: PyTorch optimizer
+        epoch: Current epoch
+        loss: Current loss value
+        path: Save path
+    """
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }
+    torch.save(checkpoint, path)
+    print(f"✓ Checkpoint saved to {path}")
+
+
+def load_checkpoint(model, optimizer, path, device='cpu'):
+    """
+    Load complete training checkpoint.
+    
+    Args:
+        model: PyTorch model
+        optimizer: PyTorch optimizer
+        path: Path to checkpoint
+        device: Device to load on
+        
+    Returns:
+        Tuple of (model, optimizer, epoch, loss)
+    """
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    print(f"✓ Checkpoint loaded from {path} (epoch {epoch}, loss {loss:.4f})")
+    return model, optimizer, epoch, loss
+
+
+class TrainingHistory:
+    """
+    Track training metrics over epochs.
+    
+    Example:
+        >>> history = TrainingHistory()
+        >>> 
+        >>> for epoch in range(num_epochs):
+        ...     train_loss = train_one_epoch(model, train_loader)
+        ...     val_loss = validate(model, val_loader)
+        ...     
+        ...     history.add_epoch({
+        ...         'train_loss': train_loss,
+        ...         'val_loss': val_loss,
+        ...         'learning_rate': optimizer.param_groups[0]['lr']
+        ...     })
+        ...     
+        ...     history.plot(save_path='training_curves.png')
+    """
+    def __init__(self):
+        self.history = {}
+        
+    def add_epoch(self, metrics):
+        """Add metrics for one epoch."""
+        for key, value in metrics.items():
+            if key not in self.history:
+                self.history[key] = []
+            self.history[key].append(value)
+    
+    def get_metric(self, metric_name):
+        """Get all values for a specific metric."""
+        return self.history.get(metric_name, [])
+    
+    def plot(self, metrics=None, save_path=None):
+        """
+        Plot training curves.
+        
+        Args:
+            metrics: List of metric names to plot (None = plot all)
+            save_path: Path to save figure
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Warning: matplotlib not installed, cannot plot")
+            return
+        
+        if metrics is None:
+            metrics = list(self.history.keys())
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        for metric in metrics:
+            if metric in self.history:
+                epochs = range(1, len(self.history[metric]) + 1)
+                ax.plot(epochs, self.history[metric], label=metric, marker='o')
+        
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Value')
+        ax.set_title('Training History')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✓ Plot saved to {save_path}")
+        else:
+            plt.show()
+        
+        plt.close()
+    
+    def save(self, path):
+        """Save history to file."""
+        import json
+        with open(path, 'w') as f:
+            json.dump(self.history, f, indent=2)
+        print(f"✓ History saved to {path}")
+    
+    def load(self, path):
+        """Load history from file."""
+        import json
+        with open(path, 'r') as f:
+            self.history = json.load(f)
+        print(f"✓ History loaded from {path}")
+
+
+# ============================================================================
+# SIMPLER ATTENTION MECHANISM (alternative to CBAM)
+# ============================================================================
+
+class SimpleAttention(nn.Module):
+    """
+    Simpler channel attention mechanism (alternative to CBAM).
+    Uses global average pooling + small MLP.
+    
+    This is lighter weight than CBAM but still effective.
+    """
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Conv3d(channels, channels // reduction, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(channels // reduction, channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        attn = self.attention(x)
+        return x * attn
+
+
+# ============================================================================
+# MAIN (TESTS)
+# ============================================================================
 
 if __name__ == "__main__":
     # Test configurations
