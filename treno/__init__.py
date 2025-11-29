@@ -40,22 +40,12 @@ from .models import (
     EarlyStopping,
     ModelCheckpoint,
     TrainingHistory,
-    save_model,  # DEPRECATED: use pyable_ml.io.save_model
-    load_model,  # DEPRECATED: use pyable_ml.io.load_model
-    save_checkpoint,  # DEPRECATED: use pyable_ml.io.save_checkpoint
-    load_checkpoint,  # DEPRECATED: use pyable_ml.io.load_checkpoint
+    # Model I/O (imported from pyable-ml)
+    save_model,
+    load_model,
+    save_checkpoint,
+    load_checkpoint,
 )
-
-# Also export from pyable-ml for new code
-try:
-    from pyable_ml.io import (
-        save_model as save_model_new,
-        load_model as load_model_new,
-        save_checkpoint as save_checkpoint_new,
-        load_checkpoint as load_checkpoint_new,
-    )
-except ImportError:
-    pass  # pyable-ml not installed yet
 
 from .utils import (
     # Feature selection
