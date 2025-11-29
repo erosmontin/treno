@@ -190,7 +190,7 @@ class UNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[64, 128, 256, 512], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True,reduction=2):
+                 use_attention=True,reduction=2, use_skip_attention=False):
         
         super().__init__()
         
@@ -215,6 +215,8 @@ class UNetBase(nn.Module):
         )
         
         self.ups = nn.ModuleList()
+        self.use_skip_attention = use_skip_attention
+        self.skip_gates = nn.ModuleList() if use_skip_attention else None
         for filters in reversed(num_filters):
             self.ups.append(nn.Sequential(
                 ConvTransposeNd(filters*2, filters, kernel_size=2, stride=2),
@@ -222,6 +224,9 @@ class UNetBase(nn.Module):
                             use_batchnorm, activation, dropout_rate, leaky_slope, 
                             bias, use_residual, use_attention,reduction)
             ))
+            if use_skip_attention:
+                # gate expects skip (filters) and decoder g (filters)
+                self.skip_gates.append(AttentionGate(filters, filters, filters//2, dimension))
             
     def forward_features(self, x):
         skip_connections = []
@@ -242,9 +247,130 @@ class UNetBase(nn.Module):
             if x.shape[2:] != skip.shape[2:]:
                 mode = 'linear' if len(x.shape) == 3 else 'bilinear' if len(x.shape) == 4 else 'trilinear'
                 x = F.interpolate(x, size=skip.shape[2:], mode=mode, align_corners=False)
+            if self.use_skip_attention:
+                skip = self.skip_gates[i](skip, x)
             x = torch.cat([skip, x], dim=1)
             x = up[1](x)
         return x
+
+class UNetPPBase(nn.Module):
+    """UNet++ base with nested dense skip connections. Supports 1D/2D/3D."""
+    def __init__(self, in_channels, num_filters=[64, 128, 256], dimension=2,
+                 kernel_size=3, use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True, reduction=2):
+        super().__init__()
+        _, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
+        self.pool = MaxPoolNd(kernel_size=2, stride=2)
+        self.num_filters = num_filters
+        
+        # Encoder path
+        self.enc = nn.ModuleList()
+        current_channels = in_channels
+        for f in num_filters:
+            self.enc.append(BaseConvBlock(current_channels, f, dimension, kernel_size, 1,
+                                          use_batchnorm, activation, dropout_rate, leaky_slope,
+                                          bias, False, use_attention, reduction))
+            current_channels = f
+        
+        # Nested decoder nodes X^{i,j}
+        # Maintain per-level refined nodes and compute accurate concat channels
+        self.nodes = nn.ModuleDict()
+        for i in range(len(num_filters)):
+            for j in range(1, len(num_filters)-i):
+                # Inputs: X^{i,0} (enc) + upsample(X^{i+1,j-1}) + (j-1) refined nodes X^{i,1..j-1}
+                # Upsample output matches num_filters[i], so: j*num_filters[i] + num_filters[i] (from deeper)
+                # Actually: X[i][0..j-1] all have num_filters[i] channels, up has num_filters[i] after upsample
+                in_ch = num_filters[i] * (j + 1)  # j skips from level i + 1 upsampled
+                out_ch = num_filters[i]
+                self.nodes[f"{i}_{j}"] = BaseConvBlock(
+                    in_ch, out_ch, dimension, kernel_size, 1,
+                    use_batchnorm, activation, dropout_rate, leaky_slope,
+                    bias, False, use_attention, reduction
+                )
+        
+        # Upsamplers for connecting deeper features upwards
+        self.ups = nn.ModuleDict()
+        for i in range(1, len(num_filters)):
+            self.ups[str(i)] = ConvTransposeNd(num_filters[i], num_filters[i-1], kernel_size=2, stride=2)
+        
+    def forward_features(self, x):
+        # Encoder outputs (X^{i,0}) stored in grid
+        N = len(self.num_filters)
+        X = [[None for _ in range(N)] for _ in range(N)]
+        cur = x
+        for i, enc in enumerate(self.enc):
+            cur = enc(cur)
+            X[i][0] = cur
+            if i < N-1:
+                cur = self.pool(cur)
+        # Nested decoding
+        for j in range(1, N):
+            for i in range(N - j):
+                up = self.ups[str(i+1)](X[i+1][j-1])
+                # Align spatial size with X[i][0]
+                if up.shape[2:] != X[i][0].shape[2:]:
+                    mode = 'linear' if self.dimension == 1 else 'bilinear' if self.dimension == 2 else 'trilinear'
+                    up = F.interpolate(up, size=X[i][0].shape[2:], mode=mode, align_corners=False)
+                # Dense concat: X^{i,0} .. X^{i, j-1} plus up
+                concat = [X[i][k] for k in range(0, j)] + [up]
+                X[i][j] = self.nodes[f"{i}_{j}"](torch.cat(concat, dim=1))
+        return X[0][N-1]
+    
+    def forward(self, x):
+        return self.forward_features(x)
+
+class EMUNetPP(nn.Module):
+    """UNet++ wrapper with NetworkHead for segmentation/classification/regression."""
+    def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64,128,256],
+                 task='segmentation', use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024,512],
+                 extra_params_dim=0, use_attention=True, use_radiomics=False,
+                 num_bins=256, radii=[1]):
+        super().__init__()
+        if in_channels <= 0 or out_channels <= 0:
+            raise ValueError("Channels must be positive")
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.task = task
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
+        self.extra_params_dim = extra_params_dim
+        
+        self.base = UNetPPBase(in_channels, num_filters, dimension, 3, use_batchnorm,
+                               activation, dropout_rate, leaky_slope, bias, use_attention)
+        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Use first level filters for head input similar to EMUNet
+        self.head = NetworkHead(num_filters[0], out_channels, dimension, task, fc_layers,
+                                dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim)
+    
+    def _compute_radiomics(self, x):
+        stats_features = []
+        for i in range(x.shape[0]):
+            channelfeatures = []
+            for j in range(self.in_channels):
+                fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                combined = torch.cat((fos, glcm))
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
+                channelfeatures.append(combined)
+            stats_features.append(torch.cat(channelfeatures))
+        return torch.stack(stats_features)
+    
+    def forward(self, x, extra_params=None):
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        radiomics_features = None
+        if self.use_radiomics:
+            radiomics_features = self._compute_radiomics(x)
+        x = self.base(x)
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        return self.head(x, radiomics_features, extra_params)
 
 class LeNetBase(nn.Module):
     """Base LeNet architecture with flexible configuration."""
@@ -400,7 +526,8 @@ class EMUNet(nn.Module):
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1],reduction=2):
+                 use_radiomics=False, num_bins=256, radii=[1],reduction=2,
+                 use_skip_attention=False):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -417,7 +544,8 @@ class EMUNet(nn.Module):
         self.task = task
         self.base = UNetBase(
             in_channels, num_filters, dimension, 3, use_batchnorm,
-            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
+            activation, dropout_rate, leaky_slope, bias, use_residual, use_attention, reduction,
+            use_skip_attention
         )
         
         radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
@@ -426,6 +554,10 @@ class EMUNet(nn.Module):
             num_filters[0], out_channels, dimension, task, fc_layers,
             dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim
         )
+        # Optional fusion: gate UNet output feature maps with extra_params
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(num_filters[0], extra_params_dim)
         
     def forward(self, x, extra_params=None):
         # Validate input dimensions
@@ -444,9 +576,13 @@ class EMUNet(nn.Module):
         if self.use_radiomics:
             radiomics_features = self._compute_radiomics(x)
         x = self.base(x)
+        # validate extra_params dimensions before applying fusion
         if extra_params is not None and self.extra_params_dim > 0:
             if extra_params.shape[1] != self.extra_params_dim:
                 raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        # apply fusion gating to UNet output feature maps if requested
+        if extra_params is not None and self.use_fusion:
+            x = self.fusion(x, extra_params)
         return self.head(x, radiomics_features, extra_params)
     
     def _compute_radiomics(self, x):
@@ -528,15 +664,23 @@ class EMLeNet(nn.Module):
             num_filters[-2], out_channels, dimension, task, fc_layers,
             dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim
         )
+        # Optional fusion: gate LeNet output feature maps with extra_params
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(num_filters[-2], extra_params_dim)
         
     def forward(self, x, extra_params=None):
         radiomics_features = None
         if self.use_radiomics:
             radiomics_features = self._compute_radiomics(x)
         x = self.base(x)
+        # validate extra_params dimensions before applying fusion
         if extra_params is not None and self.extra_params_dim > 0:
             if extra_params.shape[1] != self.extra_params_dim:
                 raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        # apply fusion gating to LeNet feature maps if requested
+        if extra_params is not None and self.use_fusion:
+            x = self.fusion(x, extra_params)
         return self.head(x, radiomics_features, extra_params)
     
     def _compute_radiomics(self, x):
@@ -873,6 +1017,237 @@ class SimpleAttention(nn.Module):
     def forward(self, x):
         attn = self.attention(x)
         return x * attn
+
+
+
+
+# ============================================================================
+# ATTENTION GATE (Attention U-Net style)
+# ============================================================================
+
+class AttentionGate(nn.Module):
+    """Attention gate for skip connections in U-Net (dimension-agnostic)."""
+    def __init__(self, in_channels_x, in_channels_g, inter_channels, dimension=2):
+        super().__init__()
+        ConvNd, _, _, BatchNormNd, _, _ = getNdTools(dimension)
+        self.theta_x = ConvNd(in_channels_x, inter_channels, kernel_size=2, stride=2, bias=False)
+        self.phi_g = ConvNd(in_channels_g, inter_channels, kernel_size=1, bias=False)
+        self.psi = ConvNd(inter_channels, 1, kernel_size=1, bias=True)
+        self.bn = BatchNormNd(inter_channels)
+        self.sigmoid = nn.Sigmoid()
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, x, g):
+        # x: skip connection, g: gating (decoder feature)
+        x1 = self.theta_x(x)
+        g1 = self.phi_g(g)
+        # align shapes
+        if x1.shape[2:] != g1.shape[2:]:
+            mode = 'linear' if len(x1.shape) == 3 else 'bilinear' if len(x1.shape) == 4 else 'trilinear'
+            g1 = F.interpolate(g1, size=x1.shape[2:], mode=mode, align_corners=False)
+        z = self.relu(self.bn(x1 + g1))
+        attn = self.sigmoid(self.psi(z))
+        # upsample attn back to x size
+        if attn.shape[2:] != x.shape[2:]:
+            mode = 'linear' if len(attn.shape) == 3 else 'bilinear' if len(attn.shape) == 4 else 'trilinear'
+            attn = F.interpolate(attn, size=x.shape[2:], mode=mode, align_corners=False)
+        return x * attn
+
+
+# ============================================================================
+# FUSION HEAD (clinical/imaging gated fusion)
+# ============================================================================
+
+class FusionHead(nn.Module):
+    """Fusion module that uses extra scalar params to gate image feature maps.
+
+    It computes a small MLP from extra_params -> per-channel gates, applies sigmoid
+    and multiplies (1 + gate) * feature_map so image features are modulated by
+    clinical signals. Dimension-agnostic: gates are broadcast over spatial dims.
+    """
+    def __init__(self, in_channels, extra_dim, hidden=[64, 64], activation='relu'):
+        super().__init__()
+        layers = []
+        input_dim = extra_dim
+        for h in hidden:
+            layers.append(nn.Linear(input_dim, h))
+            layers.append(nn.ReLU(inplace=True) if activation == 'relu' else nn.LeakyReLU(0.1, inplace=True))
+            input_dim = h
+        layers.append(nn.Linear(input_dim, in_channels))
+        self.mlp = nn.Sequential(*layers)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, feat, extra_params):
+        """Apply gating: feat shape [B, C, ...], extra_params [B, D] -> returns gated feat"""
+        if extra_params is None:
+            return feat
+        gates = self.mlp(extra_params)  # [B, C]
+        gates = self.sigmoid(gates).unsqueeze(-1)
+        # expand to spatial dims
+        spatial_dims = feat.dim() - 2
+        for _ in range(spatial_dims - 1):
+            gates = gates.unsqueeze(-1)
+        # gates shape [B, C, 1, ...]
+        return feat * (1.0 + gates)
+
+
+# ============================================================================
+# RESNET ENCODERS (1D/2D/3D)
+# ============================================================================
+
+class BasicBlockNd(nn.Module):
+    """Dimension-agnostic Basic Residual Block (like ResNet-18/34)."""
+    expansion = 1
+    def __init__(self, in_channels, out_channels, dimension=2, stride=1,
+                 use_batchnorm=True, activation='relu', bias=False):
+        super().__init__()
+        ConvNd, _, _, BatchNormNd, _, _ = getNdTools(dimension)
+        self.use_bn = use_batchnorm
+        padding = 1
+        self.conv1 = ConvNd(in_channels, out_channels, kernel_size=3, stride=stride,
+                            padding=padding, bias=bias)
+        self.bn1 = BatchNormNd(out_channels) if use_batchnorm else nn.Identity()
+        self.act = nn.ReLU(inplace=True) if activation == 'relu' else nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = ConvNd(out_channels, out_channels, kernel_size=3, stride=1,
+                            padding=padding, bias=bias)
+        self.bn2 = BatchNormNd(out_channels) if use_batchnorm else nn.Identity()
+        
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                ConvNd(in_channels, out_channels, kernel_size=1, stride=stride, bias=bias),
+                BatchNormNd(out_channels) if use_batchnorm else nn.Identity()
+            )
+    
+    def forward(self, x):
+        identity = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.act(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        if self.downsample is not None:
+            identity = self.downsample(x)
+        out += identity
+        out = self.act(out)
+        return out
+
+class ResNetEncoder(nn.Module):
+    """ResNet-style encoder with AdaptiveAvgPool output for heads.
+    Supports 1D, 2D, 3D by passing dimension.
+    """
+    def __init__(self, in_channels, dimension=2, layers=(2, 2, 2, 2), base_width=64,
+                 use_batchnorm=True, activation='relu', bias=False):
+        super().__init__()
+        ConvNd, _, MaxPoolNd, BatchNormNd, _, _ = getNdTools(dimension)
+        self.dimension = dimension
+        self.inplanes = base_width
+        self.use_bn = use_batchnorm
+        
+        # Stem
+        self.conv1 = ConvNd(in_channels, self.inplanes, kernel_size=7, stride=2, padding=3, bias=bias)
+        self.bn1 = BatchNormNd(self.inplanes) if use_batchnorm else nn.Identity()
+        self.act = nn.ReLU(inplace=True) if activation == 'relu' else nn.LeakyReLU(0.1, inplace=True)
+        self.pool = MaxPoolNd(kernel_size=3, stride=2, padding=1)
+        
+        # Layers
+        self.layer1 = self._make_layer(self.inplanes, base_width, layers[0], stride=1, activation=activation)
+        self.layer2 = self._make_layer(base_width, base_width*2, layers[1], stride=2, activation=activation)
+        self.layer3 = self._make_layer(base_width*2, base_width*4, layers[2], stride=2, activation=activation)
+        self.layer4 = self._make_layer(base_width*4, base_width*8, layers[3], stride=2, activation=activation)
+        
+        # Output pool
+        self.gap = {1: nn.AdaptiveAvgPool1d(1), 2: nn.AdaptiveAvgPool2d(1), 3: nn.AdaptiveAvgPool3d(1)}[dimension]
+        
+    def _make_layer(self, in_c, out_c, blocks, stride, activation):
+        layers = []
+        layers.append(BasicBlockNd(in_c, out_c, dimension=self.dimension, stride=stride,
+                                   use_batchnorm=self.use_bn, activation=activation))
+        for _ in range(1, blocks):
+            layers.append(BasicBlockNd(out_c, out_c, dimension=self.dimension, stride=1,
+                                       use_batchnorm=self.use_bn, activation=activation))
+        return nn.Sequential(*layers)
+    
+    def forward_features(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.pool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        return x
+    
+    def forward(self, x):
+        x = self.forward_features(x)
+        x = self.gap(x)
+        return x
+
+class EMResNet(nn.Module):
+    """EMResNet: ResNet encoder + NetworkHead for classification/regression.
+    Supports radiomics and extra_params like EMUNet.
+    """
+    def __init__(self, in_channels, out_channels, dimension=2, task='classification',
+                 layers=(2,2,2,2), base_width=64, use_batchnorm=True, activation='relu',
+                 dropout_rate=0.0, bias=False, fc_layers=[1024, 512],
+                 extra_params_dim=0, use_radiomics=False, num_bins=256, radii=[1]):
+        super().__init__()
+        if in_channels <= 0 or out_channels <= 0:
+            raise ValueError("Channels must be positive")
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.task = task
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
+        self.extra_params_dim = extra_params_dim
+        
+        self.encoder = ResNetEncoder(in_channels, dimension, layers, base_width,
+                                     use_batchnorm, activation, bias)
+        # Radiomics dim matches EMUNet calculation
+        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Encoder output channels = base_width*8
+        self.head = NetworkHead(base_width*8, out_channels, dimension, task, fc_layers,
+                                dropout_rate, 'leaky_relu' if activation=='relu' else activation,
+                                0.1, bias, radiomics_dim, extra_params_dim)
+        # Optional fusion: gate encoder feature maps with extra_params
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(base_width*8, extra_params_dim)
+    
+    def _compute_radiomics(self, x):
+        stats_features = []
+        for i in range(x.shape[0]):
+            channelfeatures = []
+            for j in range(self.in_channels):
+                fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                combined = torch.cat((fos, glcm))
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
+                channelfeatures.append(combined)
+            stats_features.append(torch.cat(channelfeatures))
+        return torch.stack(stats_features)
+    
+    def forward(self, x, extra_params=None):
+        # Validate input dims
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        radiomics_features = None
+        if self.use_radiomics:
+            radiomics_features = self._compute_radiomics(x)
+        x = self.encoder(x)
+        # validate extra_params dimensions before applying fusion
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        # apply fusion gating to encoder feature maps if requested
+        if extra_params is not None and self.use_fusion:
+            x = self.fusion(x, extra_params)
+        return self.head(x, radiomics_features, extra_params)
 
 
 # ============================================================================
