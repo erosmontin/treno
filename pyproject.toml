@@ -25,6 +25,7 @@ dependencies = [
     "pynico @ git+https://github.com/erosmontin/pynico.git",
     "pyable @ git+https://github.com/erosmontin/pyable.git",
     "pyable-dataloader",
+    "pyable-ml[torch,plotting]",
     "imbalanced-learn"
 ]
 

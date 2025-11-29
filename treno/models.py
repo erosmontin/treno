@@ -840,71 +840,18 @@ class ModelCheckpoint:
                 print(f'✓ New best {self.monitor}: {metric_value:.4f} (saved to {best_path})')
 
 
-def save_model(model, path):
-    """Save model state dict."""
-    torch.save(model.state_dict(), path)
-    print(f"✓ Model saved to {path}")
+# ============================================================================
+# Model I/O - Now imported from pyable-ml
+# ============================================================================
 
+from pyable_ml.io import save_model, load_model, save_checkpoint, load_checkpoint
 
-def load_model(model, path, device='cpu'):
-    """
-    Load model state dict.
-    
-    Args:
-        model: Model instance to load weights into
-        path: Path to saved state dict
-        device: Device to load model on
-        
-    Returns:
-        Model with loaded weights
-    """
-    model.load_state_dict(torch.load(path, map_location=device))
-    model.eval()
-    print(f"✓ Model loaded from {path}")
-    return model
+# Note: The pyable-ml versions have slightly different signatures:
+# - save_model(model, path) works the same
+# - load_model(path, model_class=instance, device='cpu') requires model_class parameter
+# - save_checkpoint and load_checkpoint work similarly but return dict instead of tuple
 
-
-def save_checkpoint(model, optimizer, epoch, loss, path):
-    """
-    Save complete training checkpoint.
-    
-    Args:
-        model: PyTorch model
-        optimizer: PyTorch optimizer
-        epoch: Current epoch
-        loss: Current loss value
-        path: Save path
-    """
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': loss,
-    }
-    torch.save(checkpoint, path)
-    print(f"✓ Checkpoint saved to {path}")
-
-
-def load_checkpoint(model, optimizer, path, device='cpu'):
-    """
-    Load complete training checkpoint.
-    
-    Args:
-        model: PyTorch model
-        optimizer: PyTorch optimizer
-        path: Path to checkpoint
-        device: Device to load on
-        
-    Returns:
-        Tuple of (model, optimizer, epoch, loss)
-    """
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint['epoch']
-    loss = checkpoint['loss']
-    print(f"✓ Checkpoint loaded from {path} (epoch {epoch}, loss {loss:.4f})")
-    return model, optimizer, epoch, loss
+__all__ = ['save_model', 'load_model', 'save_checkpoint', 'load_checkpoint']
 
 
 class TrainingHistory:
