@@ -844,7 +844,7 @@ class ModelCheckpoint:
 # Model I/O - Now imported from pyable-ml
 # ============================================================================
 
-from pyable_ml.io import save_model, load_model, save_checkpoint, load_checkpoint
+from pyml.io import save_model, load_model, save_checkpoint, load_checkpoint
 
 # Note: The pyable-ml versions have slightly different signatures:
 # - save_model(model, path) works the same
