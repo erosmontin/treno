@@ -3,3 +3,4 @@ dist/
 rnn_torchviz.png
 *.pyc
 .vscode/
+radiomics_results/radiomics_features.csv

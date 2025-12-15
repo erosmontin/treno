@@ -63,7 +63,7 @@ gradcam = GradCAM(model, target_layer=target_layer)
 # ---------------------------
 from unified_dataloader import UnifiedNiftiDataset as NiftiDataset
 from unified_dataloader import overlay_on_original, create_resampled_image_sitk
-import pyable_eros_montin.imaginable as ima
+from pyable import imaginable as ima
 
 nifti_dataset = NiftiDataset(
     csv_file='oxford_FAI_0label.csv',

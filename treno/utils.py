@@ -3,8 +3,20 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix, roc_auc_score, multilabel_confusion_matrix
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from pynico_eros_montin import stats as st
 from sklearn.preprocessing import StandardScaler, LabelBinarizer
+
+# Helper functions for confusion matrix metrics (previously in pynico.stats)
+def accuracyFromConfusion(c):
+    tn, fp, fn, tp = c.ravel()
+    return (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+
+def specificityFromConfusion(c):
+    tn, fp, fn, tp = c.ravel()
+    return tn / (tn + fp) if (tn + fp) > 0 else 0
+
+def sensitivityFromConfusion(c):
+    tn, fp, fn, tp = c.ravel()
+    return tp / (tp + fn) if (tp + fn) > 0 else 0
 from sklearn.model_selection import train_test_split, GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
@@ -38,9 +50,9 @@ def testPrediction(Ygt, Yhat,labels=None):
     C=multilabel_confusion_matrix(Ygt.flatten(), Yhat.flatten(),labels=labels)
     for c,l in zip(C,labels):
         tn_, fp_, fn_, tp_ = c.ravel()
-        o = {"accuracy": st.accuracyFromConfusion(c),
-             "specificity": st.specificityFromConfusion(c),
-             "sensitivity": st.sensitivityFromConfusion(c),
+        o = {"accuracy": accuracyFromConfusion(c),
+             "specificity": specificityFromConfusion(c),
+             "sensitivity": sensitivityFromConfusion(c),
              "tn": tn_,
              "tp": tp_,
              "fp": fp_,

@@ -22,8 +22,8 @@ dependencies = [
     "scikit-learn",
     "torchvision",
     "tensorboard",
-    "pynico @ git+https://github.com/erosmontin/pynico.git",
-    "pyable @ git+https://github.com/erosmontin/pyable.git",
+    "pynico",
+    "pyable",
     "pyable-dataloader",
     "pyable-ml[torch,plotting]",
     "imbalanced-learn"
