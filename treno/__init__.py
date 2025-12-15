@@ -16,15 +16,38 @@ from .loaders import (
     PYABLE_DATALOADER_AVAILABLE,
 )
 
+# 1D-optimized models for time-series
+try:
+    from .unet_1d_optimized import (
+        UNet1DOptimized,
+        EMUNet1D,
+        DilatedConv1dBlock,
+        TemporalPooling,
+    )
+    _1D_AVAILABLE = True
+except ImportError:
+    _1D_AVAILABLE = False
+
 from .models import (
     # Main architectures
     EMUNet,
     EMLeNet,
+    EMUNetPP,
+    EMResNet,
+    # New: Map-to-map models for image translation
+    EMUNetMapToMap,
+    EMUNetPPMapToMap,
+    MapToMapHead,
     # Building blocks
     CBAM,
     BaseConvBlock,
     NetworkHead,
     SimpleAttention,
+    # New: Skip connection utilities
+    SkipConnectionAligner,
+    # Radiomics and feature computation
+    calculate_fos_features,
+    calculate_simple_glcm_features,
     # Training utilities
     EarlyStopping,
     ModelCheckpoint,
@@ -67,25 +90,53 @@ from .utils import (
     train,
 )
 
-__version__ = "3.0.5.0"
+__version__ = "3.5.0.0"
 
 __all__ = [
-    # Modern API
+    # Modern Loaders
     "TrenoDataset",
     "create_manifest_from_csv",
     "save_manifest",
     "load_manifest",
     "create_treno_dataset_from_csv",
-    # Legacy API
-    "ImageImageDataset",
-    "ImageLabelmapDataset",
-    "ImaImaDataset",
-    "ImaRoiDataset",
-    "normalize",
-    "labelMapToChannel",
-    "possibletransforms",
-    "ImaginableDataloader",
+    # Main Architectures (2D/3D)
+    "EMUNet",
+    "EMUNetPP",
+    "EMLeNet",
+    "EMResNet",
+    # New: Map-to-Map Models (ND image translation)
+    "EMUNetMapToMap",
+    "EMUNetPPMapToMap",
+    "MapToMapHead",
+    # 1D Models (time-series)
+    "UNet1DOptimized",
+    "EMUNet1D",
+    "DilatedConv1dBlock",
+    "TemporalPooling",
+    # Building Blocks
+    "CBAM",
+    "BaseConvBlock",
+    "NetworkHead",
+    "SimpleAttention",
+    "SkipConnectionAligner",
+    # Features
+    "calculate_fos_features",
+    "calculate_simple_glcm_features",
+    # Training Utilities
+    "EarlyStopping",
+    "ModelCheckpoint",
+    "TrainingHistory",
+    "save_model",
+    "load_model",
+    "save_checkpoint",
+    "load_checkpoint",
+    # Utils
+    "feature_selection",
+    "compute_metrics",
+    "GradCAM",
+    "train",
     # Flags
     "PYABLE_DATALOADER_AVAILABLE",
-    "PYABLE_AVAILABLE",
+    "_1D_AVAILABLE",
 ]
+

@@ -65,23 +65,32 @@ def calculate_fos_features(x, num_bins=256):
     ], device=x.device)
 
 def calculate_simple_glcm_features(x, radii=[1], dimension=2):
-    """Calculate simplified GLCM-like features for a tensor across multiple radii."""
+    """Calculate simplified GLCM-like features for a tensor across multiple radii and directions."""
     glcm_features = []
+    
+    # Define axes to shift based on dimension
+    if dimension == 1:
+        axes = [0]
+    elif dimension == 2:
+        axes = [0, 1]  # vertical and horizontal
+    else:  # 3D
+        axes = [0, 1, 2]  # depth, height, width
+    
     for radius in radii:
-        if dimension == 1:
-            x_shift = torch.roll(x, shifts=radius, dims=0)
-            x_shift[:radius] = 0
-        elif dimension == 2:
-            x_shift = torch.roll(x, shifts=radius, dims=1)
-            x_shift[:, :radius] = 0
-        else:  # 3D
-            x_shift = torch.roll(x, shifts=radius, dims=2)
-            x_shift[:, :, :radius] = 0
-
-        contrast = torch.mean((x - x_shift) ** 2)
-        energy = torch.sum(x**2)
-        homogeneity = torch.mean(1 / (1 + torch.abs(x - x_shift)))
-        glcm_features.extend([contrast, energy, homogeneity])
+        for axis in axes:
+            x_shift = torch.roll(x, shifts=radius, dims=axis)
+            # Zero out the wrapped-around region
+            if axis == 0:
+                x_shift[:radius] = 0
+            elif axis == 1:
+                x_shift[:, :radius] = 0
+            else:  # axis == 2
+                x_shift[:, :, :radius] = 0
+            
+            contrast = torch.mean((x - x_shift) ** 2)
+            energy = torch.sum(x**2)
+            homogeneity = torch.mean(1 / (1 + torch.abs(x - x_shift)))
+            glcm_features.extend([contrast, energy, homogeneity])
         
     # Create the tensor on the same device as x
     return torch.tensor(glcm_features, device=x.device)
@@ -339,7 +348,10 @@ class EMUNetPP(nn.Module):
         
         self.base = UNetPPBase(in_channels, num_filters, dimension, 3, use_batchnorm,
                                activation, dropout_rate, leaky_slope, bias, use_attention)
-        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # directions: 1D=1, 2D=2, 3D=3
+        num_directions = dimension
+        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         # Use first level filters for head input similar to EMUNet
         self.head = NetworkHead(num_filters[0], out_channels, dimension, task, fc_layers,
                                 dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim)
@@ -495,7 +507,284 @@ class NetworkHead(nn.Module):
             logits = self.head(x)
             return logits  # return raw logits for CrossEntropyLoss
 
-class EMUNet(nn.Module):
+class MapToMapHead(nn.Module):
+    """
+    Head for image-to-image translation tasks (map-to-map).
+    
+    Performs dense pixel/voxel-level prediction for tasks like:
+    - Image-to-image translation
+    - Denoising / artifact removal
+    - Image enhancement / super-resolution preparation
+    - Multi-modal synthesis
+    
+    Args:
+        in_channels: Number of input channels from backbone
+        out_channels: Number of output channels (typically equals input for translation)
+        dimension: Spatial dimension (1, 2, or 3)
+        dropout_rate: Dropout probability
+        activation: Final activation ('sigmoid', 'tanh', 'none')
+        bias: Whether to use bias in conv layers
+        extra_params_dim: Dimension of extra parameters (0 to disable)
+    """
+    def __init__(self, in_channels, out_channels, dimension=2, dropout_rate=0.0,
+                 activation='none', bias=False, extra_params_dim=0):
+        super().__init__()
+        
+        ConvNd, _, _, _, _, _ = getNdTools(dimension)
+        self.dimension = dimension
+        self.extra_params_dim = extra_params_dim
+        self.activation_name = activation.lower()
+        
+        # 1×1 convolution to map features to output channels
+        self.head = ConvNd(in_channels + extra_params_dim, out_channels, kernel_size=1, bias=bias)
+        
+        # Optional activation
+        activation_dict = {
+            'sigmoid': nn.Sigmoid(),
+            'tanh': nn.Tanh(),
+            'relu': nn.ReLU(),
+            'none': nn.Identity()
+        }
+        self.activation = activation_dict.get(activation.lower(), nn.Identity())
+    
+    def forward(self, x, extra_params=None):
+        """
+        Args:
+            x: Feature maps [B, C, ...]
+            extra_params: Extra parameters [B, extra_params_dim] (optional)
+        
+        Returns:
+            Reconstructed image [B, out_channels, ...]
+        """
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"Extra parameters dimension ({extra_params.shape[1]}) does not match expected ({self.extra_params_dim})")
+            # Expand extra_params to spatial dimensions
+            extra_params = extra_params.view(x.shape[0], self.extra_params_dim, *[1]*self.dimension)
+            extra_params = extra_params.repeat(1, 1, *x.shape[2:])
+            x = torch.cat([x, extra_params], dim=1)
+        
+        logits = self.head(x)
+        return self.activation(logits)
+
+class EMUNetMapToMap(nn.Module):
+    """
+    Enhanced Multi-task U-Net for image-to-image translation (map-to-map).
+    
+    Combines symmetric encoder-decoder architecture with skip connections
+    for high-quality image reconstruction and translation tasks.
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels (typically == in_channels for translation)
+        dimension: Spatial dimension (1, 2, or 3)
+        num_filters: List of filter counts per level
+        task: 'map-to-map' (fixed for this model)
+        activation_final: Final activation ('sigmoid', 'tanh', 'none')
+        use_batchnorm: Whether to use batch normalization
+        activation: Hidden layer activation
+        dropout_rate: Dropout probability
+        leaky_slope: Negative slope for LeakyReLU
+        bias: Whether to use bias
+        use_attention: Whether to use CBAM attention
+        use_skip_attention: Whether to apply attention to skip connections
+        extra_params_dim: Dimension of extra parameters
+    
+    Example:
+        >>> model = EMUNetMapToMap(
+        ...     in_channels=1, out_channels=1, dimension=2,
+        ...     num_filters=[64, 128, 256, 512],
+        ...     activation_final='sigmoid'
+        ... )
+        >>> x = torch.randn(2, 1, 256, 256)
+        >>> output = model(x)  # [2, 1, 256, 256]
+    """
+    def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256, 512],
+                 task='map-to-map', activation_final='none', use_batchnorm=True,
+                 activation='leaky_relu', dropout_rate=0.0, leaky_slope=0.1, bias=False,
+                 use_attention=True, use_skip_attention=False, extra_params_dim=0):
+        super().__init__()
+        
+        if in_channels <= 0 or out_channels <= 0:
+            raise ValueError("Channels must be positive")
+        
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.task = 'map-to-map'
+        self.use_skip_attention = use_skip_attention
+        self.extra_params_dim = extra_params_dim
+        
+        # Use UNetBase as encoder-decoder backbone
+        self.base = UNetBase(in_channels, num_filters, dimension, 3, use_batchnorm,
+                            activation, dropout_rate, leaky_slope, bias, False, use_attention)
+        
+        # Map-to-map head
+        self.head = MapToMapHead(num_filters[0], out_channels, dimension, dropout_rate,
+                                activation_final, bias, extra_params_dim)
+    
+    def forward(self, x, extra_params=None):
+        """
+        Args:
+            x: Input image [B, in_channels, ...]
+            extra_params: Extra parameters [B, extra_params_dim] (optional)
+        
+        Returns:
+            Reconstructed image [B, out_channels, ...]
+        """
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        
+        x = self.base(x)
+        return self.head(x, extra_params)
+    
+    def extract_features(self, x):
+        """Extract features from bottleneck for visualization/analysis."""
+        return self.base.forward_features(x), None
+
+class EMUNetPPMapToMap(nn.Module):
+    """
+    Enhanced UNet++ for image-to-image translation with dense skip connections.
+    
+    The UNet++ architecture provides multiple decoding paths, improving
+    the quality of reconstructed images compared to standard UNet.
+    
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels
+        dimension: Spatial dimension (1, 2, or 3)
+        num_filters: List of filter counts per level
+        activation_final: Final activation ('sigmoid', 'tanh', 'none')
+        use_batchnorm: Whether to use batch normalization
+        activation: Hidden layer activation
+        dropout_rate: Dropout probability
+        leaky_slope: Negative slope for LeakyReLU
+        bias: Whether to use bias
+        use_attention: Whether to use CBAM attention
+        extra_params_dim: Dimension of extra parameters
+    
+    Example:
+        >>> model = EMUNetPPMapToMap(
+        ...     in_channels=1, out_channels=1, dimension=3,
+        ...     num_filters=[32, 64, 128]
+        ... )
+        >>> x = torch.randn(1, 1, 64, 64, 64)
+        >>> output = model(x)  # [1, 1, 64, 64, 64]
+    """
+    def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256],
+                 activation_final='none', use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True,
+                 extra_params_dim=0):
+        super().__init__()
+        
+        if in_channels <= 0 or out_channels <= 0:
+            raise ValueError("Channels must be positive")
+        
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.task = 'map-to-map'
+        self.extra_params_dim = extra_params_dim
+        
+        # Use UNetPPBase as encoder-decoder backbone
+        self.base = UNetPPBase(in_channels, num_filters, dimension, 3, use_batchnorm,
+                              activation, dropout_rate, leaky_slope, bias, use_attention)
+        
+        # Map-to-map head
+        self.head = MapToMapHead(num_filters[0], out_channels, dimension, dropout_rate,
+                                activation_final, bias, extra_params_dim)
+    
+    def forward(self, x, extra_params=None):
+        """
+        Args:
+            x: Input image [B, in_channels, ...]
+            extra_params: Extra parameters [B, extra_params_dim] (optional)
+        
+        Returns:
+            Reconstructed image [B, out_channels, ...]
+        """
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        
+        x = self.base(x)
+        return self.head(x, extra_params)
+    
+    def extract_features(self, x):
+        """Extract features from bottleneck for visualization/analysis."""
+        return self.base.forward_features(x), None
+
+class SkipConnectionAligner(nn.Module):
+    """
+    Utility to handle spatial misalignment in skip connections.
+    
+    Provides flexible padding/cropping strategies for cases where
+    encoder and decoder feature maps have different spatial dimensions.
+    
+    Strategies:
+        'pad': Zero-pad decoder features to match encoder
+        'crop': Crop encoder features to match decoder
+        'interpolate': Interpolate decoder features to match encoder
+    """
+    def __init__(self, strategy='interpolate'):
+        super().__init__()
+        if strategy not in ['pad', 'crop', 'interpolate']:
+            raise ValueError(f"Unknown strategy: {strategy}. Must be one of 'pad', 'crop', 'interpolate'")
+        self.strategy = strategy
+    
+    def forward(self, encoder_feat, decoder_feat, dimension):
+        """
+        Align decoder_feat to match encoder_feat spatial dimensions.
+        
+        Args:
+            encoder_feat: Feature map from encoder [B, C, ...]
+            decoder_feat: Feature map from decoder [B, C, ...]
+            dimension: Number of spatial dimensions (1, 2, or 3)
+        
+        Returns:
+            Aligned decoder feature [B, C, ...] matching encoder spatial shape
+        """
+        target_shape = encoder_feat.shape[2:]
+        current_shape = decoder_feat.shape[2:]
+        
+        if current_shape == target_shape:
+            return decoder_feat
+        
+        if self.strategy == 'interpolate':
+            mode = 'linear' if dimension == 1 else 'bilinear' if dimension == 2 else 'trilinear'
+            return F.interpolate(decoder_feat, size=target_shape, mode=mode, align_corners=False)
+        
+        elif self.strategy == 'pad':
+            # Calculate padding needed for each dimension
+            padding = []
+            for curr, targ in zip(reversed(current_shape), reversed(target_shape)):
+                pad_total = targ - curr
+                pad_before = pad_total // 2
+                pad_after = pad_total - pad_before
+                padding.extend([pad_before, pad_after])
+            return F.pad(decoder_feat, padding, mode='constant', value=0)
+        
+        else:  # 'crop'
+            slices = [slice(None), slice(None)]  # batch and channel
+            for curr, targ in zip(current_shape, target_shape):
+                start = (curr - targ) // 2
+                slices.append(slice(start, start + targ))
+            return decoder_feat[tuple(slices)]
+
+
     """
     Enhanced Multi-task U-Net architecture with optional radiomics and extra parameters.
     
@@ -548,7 +837,10 @@ class EMUNet(nn.Module):
             use_skip_attention
         )
         
-        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # directions: 1D=1, 2D=2, 3D=3
+        num_directions = dimension
+        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         
         self.head = NetworkHead(
             num_filters[0], out_channels, dimension, task, fc_layers,
@@ -658,7 +950,9 @@ class EMLeNet(nn.Module):
             activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
         )
         
-        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Radiomics: 21 FOS + (3 features × directions × radii)
+        num_directions = dimension
+        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         
         self.head = NetworkHead(
             num_filters[-2], out_channels, dimension, task, fc_layers,
@@ -1152,8 +1446,9 @@ class EMResNet(nn.Module):
         
         self.encoder = ResNetEncoder(in_channels, dimension, layers, base_width,
                                      use_batchnorm, activation, bias)
-        # Radiomics dim matches EMUNet calculation
-        radiomics_dim = (24 + 3 * len(radii)) * in_channels if use_radiomics else 0
+        # Radiomics: 21 FOS + (3 features × directions × radii)
+        num_directions = dimension
+        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         # Encoder output channels = base_width*8
         self.head = NetworkHead(base_width*8, out_channels, dimension, task, fc_layers,
                                 dropout_rate, 'leaky_relu' if activation=='relu' else activation,
