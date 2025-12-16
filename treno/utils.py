@@ -25,6 +25,647 @@ from sklearn.metrics import roc_auc_score, r2_score
 from scipy.stats import pearsonr
 from scipy.signal import convolve2d
 
+
+# ============================================================================
+# Comprehensive Trainer Class
+# ============================================================================
+
+class Trainer:
+    """
+    General-purpose trainer for classification, regression, segmentation, and multi-task models.
+    
+    Supports:
+    - Single-output models (classification, regression, segmentation)
+    - Dual-output models (EMDualHead: segmentation + classification/regression)
+    - Extra parameters (clinical metadata via extra_params)
+    - Early stopping, checkpointing, and learning rate scheduling
+    - TensorBoard logging with overridable methods for custom logging
+    - Automatic device handling (CPU/GPU)
+    
+    TensorBoard Logging:
+        Pass a SummaryWriter to fit() or set self.writer directly.
+        Override these methods for custom logging:
+        - on_train_epoch_end(epoch, loss, metrics): Called after each training epoch
+        - on_val_epoch_end(epoch, loss, metrics): Called after each validation epoch
+        - on_test_end(metrics): Called after evaluation
+        - on_batch_end(phase, batch_idx, loss, output, targets): Called after each batch
+    
+    Example (Classification):
+        >>> from treno import EMResNet, Trainer
+        >>> model = EMResNet(in_channels=1, out_channels=10, dimension=2, task='classification')
+        >>> trainer = Trainer(model, task='classification', device='cuda')
+        >>> history = trainer.fit(train_loader, val_loader, epochs=100)
+        >>> metrics = trainer.evaluate(test_loader)
+        
+    Example (Segmentation):
+        >>> from treno import EMUNet, Trainer
+        >>> model = EMUNet(in_channels=1, out_channels=1, dimension=3)
+        >>> trainer = Trainer(model, task='segmentation', device='cuda')
+        >>> history = trainer.fit(train_loader, val_loader, epochs=50)
+        
+    Example (Dual-Head):
+        >>> from treno import EMDualHead, Trainer
+        >>> model = EMDualHead(in_channels=1, seg_classes=1, cls_classes=1, cls_task='regression')
+        >>> trainer = Trainer(model, task='dual', seg_weight=1.0, cls_weight=0.5, device='cuda')
+        >>> history = trainer.fit(train_loader, val_loader, epochs=100)
+    
+    Example (Your alpha angle case - regression with image + segmentation):
+        >>> from treno import EMResNet, Trainer
+        >>> model = EMResNet(in_channels=2, out_channels=1, dimension=2, task='regression')
+        >>> trainer = Trainer(model, task='regression', device='cuda')
+        >>> # DataLoader yields (torch.cat([image, seg_mask], dim=1), alpha_angle)
+        >>> history = trainer.fit(train_loader, val_loader, epochs=100)
+    
+    Example (Custom TensorBoard Logging):
+        >>> from torch.utils.tensorboard import SummaryWriter
+        >>> 
+        >>> class MyTrainer(Trainer):
+        ...     def on_train_epoch_end(self, epoch, loss, metrics):
+        ...         super().on_train_epoch_end(epoch, loss, metrics)
+        ...         # Add custom logging
+        ...         if self.writer:
+        ...             self.writer.add_histogram('model/weights', 
+        ...                 self.model.base.conv1.weight, epoch)
+        ...     
+        ...     def on_batch_end(self, phase, batch_idx, loss, output, targets):
+        ...         # Log images every 100 batches during training
+        ...         if phase == 'train' and batch_idx % 100 == 0 and self.writer:
+        ...             self.writer.add_images('train/input', targets['x'][:4], 
+        ...                 self._global_step)
+        >>> 
+        >>> writer = SummaryWriter('runs/experiment_1')
+        >>> trainer = MyTrainer(model, task='segmentation')
+        >>> trainer.fit(train_loader, val_loader, writer=writer)
+    """
+    
+    def __init__(
+        self,
+        model,
+        task='classification',  # 'classification', 'regression', 'segmentation', 'dual', 'map-to-map'
+        optimizer=None,
+        loss_fn=None,
+        seg_loss_fn=None,       # For dual-head: segmentation loss
+        cls_loss_fn=None,       # For dual-head: classification/regression loss
+        seg_weight=1.0,         # For dual-head: weight for segmentation loss
+        cls_weight=1.0,         # For dual-head: weight for classification loss
+        lr=1e-4,
+        weight_decay=1e-5,
+        device=None,
+        use_amp=False,          # Automatic mixed precision
+        grad_clip=None,         # Gradient clipping (None or float)
+    ):
+        self.model = model
+        self.task = task
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.use_amp = use_amp
+        self.grad_clip = grad_clip
+        self.seg_weight = seg_weight
+        self.cls_weight = cls_weight
+        
+        # TensorBoard writer (can be set later via fit() or directly)
+        self.writer = None
+        self._global_step = 0
+        self._current_epoch = 0
+        
+        # Device handling
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+        self.model.to(self.device)
+        
+        # Optimizer
+        if optimizer is None:
+            self.optimizer = torch.optim.AdamW(
+                model.parameters(), lr=lr, weight_decay=weight_decay
+            )
+        else:
+            self.optimizer = optimizer
+            
+        # Loss functions
+        self._setup_loss_functions(loss_fn, seg_loss_fn, cls_loss_fn)
+        
+        # AMP scaler
+        self.scaler = torch.amp.GradScaler('cuda') if use_amp and self.device.type == 'cuda' else None
+        
+        # History tracking
+        self.history = {
+            'train_loss': [], 'val_loss': [], 'test_loss': [],
+            'train_metrics': [], 'val_metrics': [], 'test_metrics': []
+        }
+    
+    # =========================================================================
+    # TensorBoard Logging Hooks (Override these for custom logging)
+    # =========================================================================
+    
+    def on_train_epoch_end(self, epoch, loss, metrics):
+        """
+        Called at the end of each training epoch. Override for custom logging.
+        
+        Args:
+            epoch: Current epoch number (0-indexed)
+            loss: Average training loss for the epoch
+            metrics: Dict of training metrics (e.g., {'accuracy': 0.95})
+        """
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/train', loss, epoch)
+            for k, v in metrics.items():
+                self.writer.add_scalar(f'Train/{k}', v, epoch)
+            # Log learning rate
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.writer.add_scalar('LearningRate', current_lr, epoch)
+    
+    def on_val_epoch_end(self, epoch, loss, metrics):
+        """
+        Called at the end of each validation epoch. Override for custom logging.
+        
+        Args:
+            epoch: Current epoch number (0-indexed)
+            loss: Average validation loss for the epoch
+            metrics: Dict of validation metrics
+        """
+        if self.writer is not None:
+            self.writer.add_scalar('Loss/val', loss, epoch)
+            for k, v in metrics.items():
+                self.writer.add_scalar(f'Val/{k}', v, epoch)
+    
+    def on_test_end(self, metrics):
+        """
+        Called at the end of evaluation/testing. Override for custom logging.
+        
+        Args:
+            metrics: Dict of test metrics including 'loss'
+        """
+        if self.writer is not None:
+            for k, v in metrics.items():
+                if isinstance(v, (int, float)):
+                    self.writer.add_scalar(f'Test/{k}', v, self._current_epoch)
+    
+    def on_batch_end(self, phase, batch_idx, loss, output, targets):
+        """
+        Called at the end of each batch. Override for custom per-batch logging.
+        
+        Args:
+            phase: 'train', 'val', or 'test'
+            batch_idx: Index of current batch
+            loss: Batch loss value
+            output: Model output for this batch
+            targets: Dict with keys 'x', 'y', 'seg_target', 'cls_target', 'extra_params'
+        
+        Example override to log images:
+            def on_batch_end(self, phase, batch_idx, loss, output, targets):
+                if phase == 'train' and batch_idx % 50 == 0 and self.writer:
+                    # Log first 4 images from batch
+                    self.writer.add_images(f'{phase}/input', targets['x'][:4], self._global_step)
+                    if self.task == 'segmentation':
+                        pred = torch.sigmoid(output[:4])
+                        self.writer.add_images(f'{phase}/prediction', pred, self._global_step)
+        """
+        pass  # Default: no per-batch logging (can be expensive)
+    
+    def on_epoch_start(self, epoch):
+        """Called at the start of each epoch. Override for custom setup."""
+        self._current_epoch = epoch
+    
+    def on_epoch_end(self, epoch, train_loss, train_metrics, val_loss, val_metrics):
+        """
+        Called at the end of each epoch (after both train and val). Override for custom logging.
+        
+        Args:
+            epoch: Current epoch number
+            train_loss: Training loss
+            train_metrics: Training metrics dict
+            val_loss: Validation loss (None if no validation)
+            val_metrics: Validation metrics dict (empty if no validation)
+        """
+        pass  # Default: no additional logging
+    
+    # =========================================================================
+    # Core Training Logic
+    # =========================================================================
+        
+    def _setup_loss_functions(self, loss_fn, seg_loss_fn, cls_loss_fn):
+        """Setup appropriate loss functions based on task."""
+        if self.task == 'classification':
+            self.loss_fn = loss_fn or torch.nn.CrossEntropyLoss()
+        elif self.task == 'regression':
+            self.loss_fn = loss_fn or torch.nn.MSELoss()
+        elif self.task == 'segmentation':
+            self.loss_fn = loss_fn or torch.nn.BCEWithLogitsLoss()
+        elif self.task == 'map-to-map':
+            self.loss_fn = loss_fn or torch.nn.MSELoss()
+        elif self.task == 'dual':
+            self.seg_loss_fn = seg_loss_fn or torch.nn.BCEWithLogitsLoss()
+            # Infer from model if possible
+            model_task = getattr(self.model, 'cls_task', 'classification')
+            if model_task == 'regression':
+                self.cls_loss_fn = cls_loss_fn or torch.nn.MSELoss()
+            else:
+                self.cls_loss_fn = cls_loss_fn or torch.nn.CrossEntropyLoss()
+        else:
+            self.loss_fn = loss_fn or torch.nn.MSELoss()
+            
+    def _to_device(self, data):
+        """Move data to device, handling tuples/lists."""
+        if isinstance(data, (list, tuple)):
+            return [d.to(self.device) if isinstance(d, torch.Tensor) else d for d in data]
+        elif isinstance(data, dict):
+            return {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        elif isinstance(data, torch.Tensor):
+            return data.to(self.device)
+        return data
+    
+    def _unpack_batch(self, batch):
+        """
+        Unpack a batch from dataloader.
+        
+        Supports formats:
+        - (x, y)
+        - (x, y, extra_params)
+        - (x, seg_target, cls_target)  # for dual-head
+        - (x, seg_target, cls_target, extra_params)  # for dual-head with extra
+        - dict with keys: 'input'/'images', 'target'/'labels', 'seg_target', 'cls_target', 'extra_params'/'aux_data'
+        """
+        if isinstance(batch, dict):
+            x = batch.get('input') or batch.get('images')
+            y = batch.get('target') or batch.get('labels')
+            seg_target = batch.get('seg_target')
+            cls_target = batch.get('cls_target')
+            extra_params = batch.get('extra_params') or batch.get('aux_data')
+        elif len(batch) == 2:
+            x, y = batch
+            seg_target, cls_target, extra_params = None, None, None
+        elif len(batch) == 3:
+            if self.task == 'dual':
+                x, seg_target, cls_target = batch
+                y, extra_params = None, None
+            else:
+                x, y, extra_params = batch
+                seg_target, cls_target = None, None
+        elif len(batch) == 4:
+            x, seg_target, cls_target, extra_params = batch
+            y = None
+        else:
+            raise ValueError(f"Unexpected batch format with {len(batch)} elements")
+            
+        return (
+            self._to_device(x),
+            self._to_device(y),
+            self._to_device(seg_target),
+            self._to_device(cls_target),
+            self._to_device(extra_params)
+        )
+    
+    def _forward(self, x, extra_params=None):
+        """Forward pass with optional extra_params."""
+        if extra_params is not None and hasattr(self.model, 'extra_params_dim') and self.model.extra_params_dim > 0:
+            return self.model(x, extra_params=extra_params)
+        return self.model(x)
+    
+    def _compute_loss(self, output, y, seg_target, cls_target):
+        """Compute loss based on task type."""
+        if self.task == 'dual':
+            seg_out, cls_out = output
+            seg_loss = self.seg_loss_fn(seg_out, seg_target)
+            cls_loss = self.cls_loss_fn(cls_out.squeeze(), cls_target)
+            return self.seg_weight * seg_loss + self.cls_weight * cls_loss
+        elif self.task == 'classification':
+            if y.dim() == 1 and isinstance(self.loss_fn, torch.nn.CrossEntropyLoss):
+                return self.loss_fn(output, y.long())
+            return self.loss_fn(output, y)
+        elif self.task == 'regression':
+            return self.loss_fn(output.squeeze(), y.float())
+        else:  # segmentation, map-to-map
+            return self.loss_fn(output, y)
+    
+    def _compute_metrics(self, output, y, seg_target, cls_target):
+        """Compute metrics based on task type."""
+        metrics = {}
+        
+        if self.task == 'dual':
+            seg_out, cls_out = output
+            # Segmentation metrics (Dice)
+            seg_pred = (torch.sigmoid(seg_out) > 0.5).float()
+            dice = self._dice_score(seg_pred, seg_target)
+            metrics['dice'] = dice.item()
+            
+            # Classification/regression metrics
+            model_task = getattr(self.model, 'cls_task', 'classification')
+            if model_task == 'regression':
+                metrics['mae'] = torch.nn.functional.l1_loss(cls_out.squeeze(), cls_target).item()
+            else:
+                pred = cls_out.argmax(dim=1) if cls_out.dim() > 1 else (cls_out > 0).long()
+                metrics['accuracy'] = (pred == cls_target).float().mean().item()
+                
+        elif self.task == 'classification':
+            pred = output.argmax(dim=1) if output.dim() > 1 and output.size(1) > 1 else (output > 0).long().squeeze()
+            target = y.long()
+            metrics['accuracy'] = (pred == target).float().mean().item()
+            
+        elif self.task == 'regression':
+            metrics['mae'] = torch.nn.functional.l1_loss(output.squeeze(), y.float()).item()
+            metrics['mse'] = torch.nn.functional.mse_loss(output.squeeze(), y.float()).item()
+            
+        elif self.task == 'segmentation':
+            pred = (torch.sigmoid(output) > 0.5).float()
+            metrics['dice'] = self._dice_score(pred, y).item()
+            
+        elif self.task == 'map-to-map':
+            metrics['mae'] = torch.nn.functional.l1_loss(output, y).item()
+            metrics['psnr'] = self._psnr(output, y).item()
+            
+        return metrics
+    
+    def _dice_score(self, pred, target, eps=1e-6):
+        """Compute Dice score."""
+        pred = pred.view(-1)
+        target = target.view(-1)
+        intersection = (pred * target).sum()
+        return (2. * intersection + eps) / (pred.sum() + target.sum() + eps)
+    
+    def _psnr(self, pred, target, max_val=1.0):
+        """Compute Peak Signal-to-Noise Ratio."""
+        mse = torch.nn.functional.mse_loss(pred, target)
+        return 20 * torch.log10(max_val / torch.sqrt(mse + 1e-8))
+    
+    def train_epoch(self, train_loader):
+        """Run one training epoch."""
+        self.model.train()
+        total_loss = 0.0
+        all_metrics = []
+        
+        for batch_idx, batch in enumerate(train_loader):
+            x, y, seg_target, cls_target, extra_params = self._unpack_batch(batch)
+            
+            self.optimizer.zero_grad()
+            
+            if self.scaler is not None:
+                with torch.amp.autocast('cuda'):
+                    output = self._forward(x, extra_params)
+                    loss = self._compute_loss(output, y, seg_target, cls_target)
+                self.scaler.scale(loss).backward()
+                if self.grad_clip:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                output = self._forward(x, extra_params)
+                loss = self._compute_loss(output, y, seg_target, cls_target)
+                loss.backward()
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.optimizer.step()
+                
+            total_loss += loss.item()
+            self._global_step += 1
+            
+            with torch.no_grad():
+                metrics = self._compute_metrics(output, y, seg_target, cls_target)
+                all_metrics.append(metrics)
+                
+                # Batch-level callback
+                targets = {'x': x, 'y': y, 'seg_target': seg_target, 
+                          'cls_target': cls_target, 'extra_params': extra_params}
+                self.on_batch_end('train', batch_idx, loss.item(), output, targets)
+                
+        avg_loss = total_loss / len(train_loader)
+        avg_metrics = self._average_metrics(all_metrics)
+        return avg_loss, avg_metrics
+    
+    @torch.no_grad()
+    def validate_epoch(self, val_loader):
+        """Run one validation epoch."""
+        self.model.eval()
+        total_loss = 0.0
+        all_metrics = []
+        
+        for batch_idx, batch in enumerate(val_loader):
+            x, y, seg_target, cls_target, extra_params = self._unpack_batch(batch)
+            
+            output = self._forward(x, extra_params)
+            loss = self._compute_loss(output, y, seg_target, cls_target)
+            
+            total_loss += loss.item()
+            metrics = self._compute_metrics(output, y, seg_target, cls_target)
+            all_metrics.append(metrics)
+            
+            # Batch-level callback
+            targets = {'x': x, 'y': y, 'seg_target': seg_target, 
+                      'cls_target': cls_target, 'extra_params': extra_params}
+            self.on_batch_end('val', batch_idx, loss.item(), output, targets)
+            
+        avg_loss = total_loss / len(val_loader)
+        avg_metrics = self._average_metrics(all_metrics)
+        return avg_loss, avg_metrics
+    
+    def _average_metrics(self, metrics_list):
+        """Average metrics across batches."""
+        if not metrics_list:
+            return {}
+        avg = {}
+        for key in metrics_list[0].keys():
+            avg[key] = np.mean([m[key] for m in metrics_list])
+        return avg
+    
+    def fit(
+        self,
+        train_loader,
+        val_loader=None,
+        epochs=100,
+        early_stopping_patience=None,
+        checkpoint_path=None,
+        scheduler=None,
+        verbose=True,
+        writer=None,  # TensorBoard SummaryWriter
+    ):
+        """
+        Train the model.
+        
+        Parameters:
+            train_loader: Training data loader
+            val_loader: Validation data loader (optional)
+            epochs: Number of epochs
+            early_stopping_patience: Stop if no improvement for N epochs (None to disable)
+            checkpoint_path: Path to save best model (None to disable)
+            scheduler: Learning rate scheduler (optional)
+            verbose: Print progress
+            writer: TensorBoard SummaryWriter (optional). 
+                    Can also set self.writer before calling fit().
+            
+        Returns:
+            dict: Training history
+        """
+        # Set writer if provided
+        if writer is not None:
+            self.writer = writer
+            
+        best_val_loss = float('inf')
+        patience_counter = 0
+        
+        for epoch in range(epochs):
+            # Epoch start callback
+            self.on_epoch_start(epoch)
+            
+            # Training
+            train_loss, train_metrics = self.train_epoch(train_loader)
+            self.history['train_loss'].append(train_loss)
+            self.history['train_metrics'].append(train_metrics)
+            
+            # Training epoch end callback (TensorBoard logging)
+            self.on_train_epoch_end(epoch, train_loss, train_metrics)
+            
+            # Validation
+            if val_loader is not None:
+                val_loss, val_metrics = self.validate_epoch(val_loader)
+                self.history['val_loss'].append(val_loss)
+                self.history['val_metrics'].append(val_metrics)
+                
+                # Validation epoch end callback (TensorBoard logging)
+                self.on_val_epoch_end(epoch, val_loss, val_metrics)
+            else:
+                val_loss, val_metrics = None, {}
+            
+            # Epoch end callback
+            self.on_epoch_end(epoch, train_loss, train_metrics, val_loss, val_metrics)
+                
+            # Learning rate scheduling
+            if scheduler is not None:
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(val_loss if val_loss else train_loss)
+                else:
+                    scheduler.step()
+                    
+            # Checkpointing
+            if checkpoint_path and val_loss is not None and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_loss,
+                }, checkpoint_path)
+                
+            # Early stopping
+            if early_stopping_patience and val_loss is not None:
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= early_stopping_patience:
+                        if verbose:
+                            print(f"Early stopping at epoch {epoch+1}")
+                        break
+                        
+            # Print progress
+            if verbose:
+                msg = f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}"
+                for k, v in train_metrics.items():
+                    msg += f" - {k}: {v:.4f}"
+                if val_loss is not None:
+                    msg += f" - Val Loss: {val_loss:.4f}"
+                    for k, v in val_metrics.items():
+                        msg += f" - val_{k}: {v:.4f}"
+                print(msg)
+                
+        return self.history
+    
+    @torch.no_grad()
+    def evaluate(self, test_loader, return_predictions=False):
+        """
+        Evaluate model on test set.
+        
+        Parameters:
+            test_loader: Test data loader
+            return_predictions: Whether to return predictions
+            
+        Returns:
+            dict: Evaluation metrics (and predictions if requested)
+        """
+        self.model.eval()
+        all_preds = []
+        all_targets = []
+        all_metrics = []
+        total_loss = 0.0
+        
+        for batch_idx, batch in enumerate(test_loader):
+            x, y, seg_target, cls_target, extra_params = self._unpack_batch(batch)
+            
+            output = self._forward(x, extra_params)
+            loss = self._compute_loss(output, y, seg_target, cls_target)
+            total_loss += loss.item()
+            
+            metrics = self._compute_metrics(output, y, seg_target, cls_target)
+            all_metrics.append(metrics)
+            
+            # Batch-level callback
+            targets = {'x': x, 'y': y, 'seg_target': seg_target, 
+                      'cls_target': cls_target, 'extra_params': extra_params}
+            self.on_batch_end('test', batch_idx, loss.item(), output, targets)
+            
+            if return_predictions:
+                if self.task == 'dual':
+                    seg_out, cls_out = output
+                    all_preds.append({
+                        'segmentation': seg_out.cpu(),
+                        'classification': cls_out.cpu()
+                    })
+                    all_targets.append({
+                        'segmentation': seg_target.cpu(),
+                        'classification': cls_target.cpu()
+                    })
+                else:
+                    all_preds.append(output.cpu())
+                    target = y if y is not None else (seg_target if seg_target is not None else cls_target)
+                    all_targets.append(target.cpu())
+                    
+        results = {
+            'loss': total_loss / len(test_loader),
+            **self._average_metrics(all_metrics)
+        }
+        
+        # Store test metrics in history
+        self.history['test_loss'].append(results['loss'])
+        self.history['test_metrics'].append({k: v for k, v in results.items() if k != 'loss' and k not in ['predictions', 'targets']})
+        
+        # Test end callback
+        self.on_test_end(results)
+        
+        if return_predictions:
+            results['predictions'] = all_preds
+            results['targets'] = all_targets
+            
+        return results
+    
+    @torch.no_grad()
+    def predict(self, x, extra_params=None):
+        """
+        Make predictions on input data.
+        
+        Parameters:
+            x: Input tensor or batch
+            extra_params: Optional extra parameters
+            
+        Returns:
+            Model output(s)
+        """
+        self.model.eval()
+        x = self._to_device(x)
+        if extra_params is not None:
+            extra_params = self._to_device(extra_params)
+        return self._forward(x, extra_params)
+    
+    def load_checkpoint(self, checkpoint_path):
+        """Load model from checkpoint."""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        return checkpoint.get('epoch'), checkpoint.get('val_loss')
+
+
 def train(model,loss, train_loader,optimizer, epoch,alt_train_loaders=[],writer=None):
     model.train()
     training_loss = 0.0

@@ -151,6 +151,42 @@ for batch in loader:
 
 ```
 
+### Joint Segmentation + Classification (EMDualHead)
+
+```python
+from treno import EMDualHead
+
+model = EMDualHead(
+    in_channels=1,
+    seg_out_channels=4,      # 4 segmentation classes
+    cls_out_channels=3,      # 3 classification classes
+    dimension=3,
+    cls_task='classification',
+    extra_params_dim=5
+)
+
+x = torch.randn(2, 1, 64, 64, 64)
+extra = torch.randn(2, 5)
+seg_out, cls_out = model(x, extra)  # [2, 4, 64, 64, 64], [2, 3]
+```
+
+### Autoencoder / VAE (EMAutoEncoder)
+
+```python
+from treno import EMAutoEncoder
+
+model = EMAutoEncoder(
+    in_channels=1,
+    out_channels=1,
+    dimension=3,
+    latent_dim=128,
+    variational=True  # VAE mode
+)
+
+x = torch.randn(2, 1, 64, 64, 64)
+recon, mu, logvar = model(x)  # Reconstruction + latent params
+```
+
 ### Deep Radiomics Feature Extraction
 
 ```python
@@ -178,6 +214,8 @@ print(feat.shape)  # e.g., [2, 64 + R]
 | **Image Translation** | ✅ | ✅ | ✅ | `EMUNetMapToMap`, `EMUNetPPMapToMap` |
 | **Classification** | ✅ | ✅ | ✅ | `EMLeNet`, `EMResNet` |
 | **Regression** | ✅ | ✅ | ✅ | `EMLeNet`, `EMResNet` |
+| **Joint Seg+Cls** | ✅ | ✅ | ✅ | `EMDualHead` |
+| **Autoencoding** | ✅ | ✅ | ✅ | `EMAutoEncoder` |
 
 ---
 
@@ -201,12 +239,72 @@ print(feat.shape)  # e.g., [2, 64 + R]
 | `EMLeNet` | Lightweight CNN | Fast inference, smaller datasets |
 | `EMResNet` | Deep residual encoder | Complex features, large datasets |
 
+### Specialized Models
+| Model | Description | When to Use |
+|-------|-------------|-------------|
+| `EMDualHead` | Joint segmentation + classification | Multi-task learning, shared features |
+| `EMAutoEncoder` | VAE/AE for latent space | Anomaly detection, feature learning |
+
 **All models support:**
 - ✅ 1D/2D/3D inputs
 - ✅ Radiomics features
 - ✅ Extra parameters (clinical metadata)
 - ✅ Fusion gating (when extra_params_dim > 0)
 - ✅ CBAM attention mechanisms
+
+---
+
+## 🏋️ Trainer Class
+
+Built-in training utilities with TensorBoard support:
+
+```python
+from treno import Trainer
+from torch.utils.tensorboard import SummaryWriter
+
+trainer = Trainer(
+    model=model,
+    optimizer=optimizer,
+    task='segmentation',      # 'classification', 'regression', 'segmentation', 'dual'
+    loss_fn=loss_fn,
+    scheduler=scheduler,
+    device='cuda',
+    use_amp=True,             # Mixed precision
+    gradient_clip=1.0,
+    early_stopping_patience=10
+)
+
+# Train with TensorBoard logging
+writer = SummaryWriter('runs/experiment')
+history = trainer.fit(
+    train_loader,
+    val_loader,
+    epochs=100,
+    writer=writer             # Auto-logs losses and metrics
+)
+
+# Evaluate
+results = trainer.evaluate(test_loader, return_predictions=True)
+```
+
+### Custom TensorBoard Logging
+
+```python
+class MyTrainer(Trainer):
+    def on_epoch_end(self, phase, epoch, loss, metrics):
+        super().on_epoch_end(phase, epoch, loss, metrics)  # Default logging
+        if self.writer and phase == 'train':
+            lr = self.optimizer.param_groups[0]['lr']
+            self.writer.add_scalar('LR', lr, epoch)
+    
+    def on_batch_end(self, phase, batch_idx, loss, output, targets):
+        # Custom per-batch logging
+        pass
+    
+    def on_test_end(self, results):
+        # Custom test completion logging
+        pass
+```
 
 ---
 

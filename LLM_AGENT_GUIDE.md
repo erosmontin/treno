@@ -45,6 +45,8 @@ from treno import (
     EMUNetPPMapToMap,    # U-Net++ for image translation
     EMResNet,            # ResNet with radiomics
     EMLeNet,             # LeNet-style CNN
+    EMDualHead,          # Joint segmentation + classification
+    EMAutoEncoder,       # VAE/AE for latent space learning
 )
 
 # Data Loading
@@ -56,6 +58,8 @@ from treno import (
 
 # Utilities
 from treno.utils import (
+    # Training
+    Trainer,             # General-purpose trainer with TensorBoard
     # Explainability
     GradCAM,
     compute_saliency_map,
@@ -130,6 +134,8 @@ dimension = 3  # Input shape: [B, C, D, H, W]
 | `EMUNetPPMapToMap` | ❌ | ❌ | ❌ | ✅ 1D/2D/3D |
 | `EMResNet` | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ❌ | ❌ |
 | `EMLeNet` | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ❌ | ❌ |
+| `EMDualHead` | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ❌ |
+| `EMAutoEncoder` | ❌ | ❌ | ❌ | ✅ 1D/2D/3D |
 
 ---
 
@@ -335,6 +341,92 @@ model = EMLeNet(
     dimension=2,
     task='classification',
 )
+```
+
+### Dual-Head: `EMDualHead`
+
+**Best for**: Joint segmentation and classification/regression from shared features
+
+```python
+from treno import EMDualHead
+
+model = EMDualHead(
+    in_channels=1,
+    seg_out_channels=4,       # Segmentation classes
+    cls_out_channels=3,       # Classification/regression outputs
+    dimension=3,
+    
+    # Task configuration
+    cls_task='classification', # 'classification' or 'regression'
+    
+    # Optional features (shared encoder)
+    use_attention=True,
+    use_radiomics=True,
+    extra_params_dim=5,
+    
+    # Architecture
+    num_filters=[32, 64, 128, 256],
+    dropout_rate=0.1,
+)
+
+# Forward pass returns (segmentation, classification)
+x = torch.randn(2, 1, 64, 64, 64)
+extra = torch.randn(2, 5)
+seg_output, cls_output = model(x, extra)
+# seg_output: [2, 4, 64, 64, 64]
+# cls_output: [2, 3]
+```
+
+**Use with**: Combined loss (segmentation + classification)
+```python
+seg_loss = nn.CrossEntropyLoss()(seg_output, seg_target)
+cls_loss = nn.CrossEntropyLoss()(cls_output, cls_target)
+total_loss = seg_loss + 0.5 * cls_loss  # Weighted combination
+```
+
+### AutoEncoder: `EMAutoEncoder`
+
+**Best for**: Latent space learning, anomaly detection, unsupervised pretraining
+
+```python
+from treno import EMAutoEncoder
+
+model = EMAutoEncoder(
+    in_channels=1,
+    out_channels=1,           # Usually same as in_channels
+    dimension=3,
+    
+    # Latent space
+    latent_dim=128,           # Bottleneck dimension
+    variational=True,         # VAE mode (False for standard AE)
+    
+    # Architecture
+    num_filters=[32, 64, 128, 256],
+    dropout_rate=0.1,
+    use_attention=True,
+)
+
+# Forward pass
+x = torch.randn(2, 1, 64, 64, 64)
+
+# VAE mode returns (reconstruction, mu, logvar)
+recon, mu, logvar = model(x)
+
+# Standard AE mode returns (reconstruction, None, None)
+# recon, _, _ = model(x)
+
+# Get latent representation
+z = model.encode(x)  # [2, 128]
+```
+
+**VAE Loss**:
+```python
+def vae_loss(recon, x, mu, logvar, beta=1.0):
+    recon_loss = F.mse_loss(recon, x, reduction='sum')
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    return recon_loss + beta * kl_loss
+
+loss = vae_loss(recon, x, mu, logvar)
 ```
 
 ---
@@ -961,6 +1053,97 @@ model.load_state_dict(checkpoint['model_state_dict'])
 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 ```
 
+### Pattern 6: Using the Trainer Class
+
+**Recommended**: Use the built-in `Trainer` class for streamlined training with best practices.
+
+```python
+from treno import Trainer
+from torch.utils.tensorboard import SummaryWriter
+
+# Create trainer
+trainer = Trainer(
+    model=model,
+    optimizer=optimizer,
+    task='segmentation',        # 'classification', 'regression', 'segmentation', 'dual'
+    loss_fn=criterion,          # Loss function
+    metrics_fn=compute_dice,    # Optional custom metrics function
+    scheduler=scheduler,        # Optional LR scheduler
+    device='cuda',
+    use_amp=True,               # Mixed precision training
+    gradient_clip=1.0,          # Gradient clipping
+    early_stopping_patience=10, # Early stopping
+)
+
+# Train with TensorBoard logging
+writer = SummaryWriter('runs/experiment')
+history = trainer.fit(
+    train_loader,
+    val_loader,
+    epochs=100,
+    writer=writer,              # Automatic TensorBoard logging
+    checkpoint_dir='checkpoints'
+)
+
+# Evaluate
+results = trainer.evaluate(test_loader, return_predictions=True)
+print(f"Test Loss: {results['loss']:.4f}")
+```
+
+**Benefits**:
+- ✅ Automatic TensorBoard logging (losses, metrics per epoch)
+- ✅ Mixed precision training (AMP)
+- ✅ Gradient clipping
+- ✅ Early stopping with patience
+- ✅ Model checkpointing (best + periodic)
+- ✅ LR scheduler integration
+- ✅ Training history tracking
+
+### Pattern 7: Custom TensorBoard Logging with Trainer Hooks
+
+Override the Trainer's hooks for custom logging:
+
+```python
+from treno import Trainer
+
+class MyTrainer(Trainer):
+    def on_epoch_end(self, phase, epoch, loss, metrics):
+        # Call parent for default TensorBoard logging
+        super().on_epoch_end(phase, epoch, loss, metrics)
+        
+        # Custom: log learning rate
+        if self.writer and phase == 'train':
+            lr = self.optimizer.param_groups[0]['lr']
+            self.writer.add_scalar('LR', lr, epoch)
+            
+            # Log weight histograms every 10 epochs
+            if epoch % 10 == 0:
+                for name, param in self.model.named_parameters():
+                    self.writer.add_histogram(f'weights/{name}', param, epoch)
+    
+    def on_batch_end(self, phase, batch_idx, loss, output, targets):
+        # Custom batch-level logging (e.g., every 100 batches)
+        if self.writer and batch_idx % 100 == 0:
+            self.writer.add_scalar(f'{phase}/batch_loss', loss, self._global_step)
+    
+    def on_test_end(self, results):
+        # Custom test completion logging
+        if self.writer:
+            for k, v in results.items():
+                if isinstance(v, (int, float)):
+                    self.writer.add_scalar(f'Test/{k}', v)
+
+# Use custom trainer
+trainer = MyTrainer(model=model, optimizer=optimizer, task='classification', ...)
+```
+
+**Available Hooks**:
+| Hook | Parameters | When Called |
+|------|------------|-------------|
+| `on_epoch_end` | `phase, epoch, loss, metrics` | After each train/val epoch |
+| `on_batch_end` | `phase, batch_idx, loss, output, targets` | After each batch |
+| `on_test_end` | `results` | After `evaluate()` completes |
+
 ---
 
 ## Debugging Guide
@@ -1143,10 +1326,17 @@ START: What is your task?
 │  ├─ Need best quality → EMUNetPP (segmentation-only)
 │  └─ Fast baseline → EMUNet (segmentation-only)
 │
-└─ Map-to-Map (Image Translation)
-   ├─ Need best quality → EMUNetPPMapToMap
-   ├─ Standard → EMUNetMapToMap
-   └─ 1D sequences → UNet1DOptimized (task='maptomap')
+├─ Map-to-Map (Image Translation)
+│  ├─ Need best quality → EMUNetPPMapToMap
+│  ├─ Standard → EMUNetMapToMap
+│  └─ 1D sequences → UNet1DOptimized (task='maptomap')
+│
+├─ Joint Segmentation + Classification/Regression
+│  └─ Multi-task learning → EMDualHead
+│
+└─ Latent Space / Anomaly Detection
+   ├─ Variational → EMAutoEncoder (variational=True)
+   └─ Standard → EMAutoEncoder (variational=False)
 ```
 
 ---
@@ -1435,3 +1625,85 @@ normalized = zScoreFeatures(feature_dataframe)
 # Remove correlated features (keep one from each correlated pair)
 filtered = filterFeaturesByCorrelation(features, threshold=0.9)
 ```
+
+---
+
+## Trainer Class API Reference
+
+### Initialization
+
+```python
+from treno import Trainer
+
+trainer = Trainer(
+    model,                          # PyTorch model
+    optimizer,                      # Optimizer (Adam, SGD, etc.)
+    task='classification',          # 'classification', 'regression', 'segmentation', 'dual'
+    loss_fn=None,                   # Loss function (auto-selected if None)
+    metrics_fn=None,                # Custom metrics function
+    scheduler=None,                 # LR scheduler
+    device='auto',                  # 'cuda', 'cpu', or 'auto'
+    use_amp=False,                  # Mixed precision training
+    gradient_clip=None,             # Max gradient norm (None to disable)
+    early_stopping_patience=None,   # Epochs without improvement (None to disable)
+)
+```
+
+### Training
+
+```python
+history = trainer.fit(
+    train_loader,                   # Training DataLoader
+    val_loader=None,                # Validation DataLoader (optional)
+    epochs=100,                     # Number of epochs
+    writer=None,                    # TensorBoard SummaryWriter (optional)
+    checkpoint_dir=None,            # Directory for checkpoints (optional)
+)
+
+# Returns dict with training history:
+# {
+#     'train_loss': [...],
+#     'val_loss': [...],
+#     'train_metrics': [...],
+#     'val_metrics': [...],
+# }
+```
+
+### Evaluation
+
+```python
+results = trainer.evaluate(
+    test_loader,                    # Test DataLoader
+    return_predictions=False,       # Return predictions with results
+)
+
+# Returns dict:
+# {
+#     'loss': float,
+#     'metric1': float,
+#     ...
+#     'predictions': [...],        # If return_predictions=True
+#     'targets': [...],            # If return_predictions=True
+# }
+```
+
+### Overridable Hooks
+
+| Method | Signature | Default Behavior |
+|--------|-----------|------------------|
+| `on_epoch_end` | `(phase, epoch, loss, metrics)` | Logs to TensorBoard if writer provided |
+| `on_batch_end` | `(phase, batch_idx, loss, output, targets)` | No-op |
+| `on_test_end` | `(results)` | No-op |
+
+### Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `trainer.model` | The model being trained |
+| `trainer.optimizer` | The optimizer |
+| `trainer.scheduler` | The LR scheduler (if any) |
+| `trainer.device` | Device being used |
+| `trainer.history` | Training history dict |
+| `trainer.writer` | TensorBoard writer (set during fit) |
+| `trainer._global_step` | Global batch counter |
+| `trainer._current_epoch` | Current epoch number |

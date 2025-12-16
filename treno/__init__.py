@@ -34,6 +34,9 @@ from .models import (
     EMLeNet,
     EMUNetPP,
     EMResNet,
+    # New: Dual-head and AutoEncoder
+    EMDualHead,
+    EMAutoEncoder,
     # New: Map-to-map models for image translation
     EMUNetMapToMap,
     EMUNetPPMapToMap,
@@ -45,6 +48,9 @@ from .models import (
     SimpleAttention,
     # New: Skip connection utilities
     SkipConnectionAligner,
+    # Attention and fusion modules
+    AttentionGate,
+    FusionHead,
     # Radiomics and feature computation
     calculate_fos_features,
     calculate_simple_glcm_features,
@@ -61,6 +67,8 @@ from .models import (
 )
 
 from .utils import (
+    # Trainer class (comprehensive training/validation/testing)
+    Trainer,
     # Feature selection
     feature_selection,
     filterFeaturesByScore,
@@ -105,7 +113,10 @@ __all__ = [
     "EMUNetPP",
     "EMLeNet",
     "EMResNet",
-    # New: Map-to-Map Models (ND image translation)
+    # Dual-Head and AutoEncoder
+    "EMDualHead",
+    "EMAutoEncoder",
+    # Map-to-Map Models (ND image translation)
     "EMUNetMapToMap",
     "EMUNetPPMapToMap",
     "MapToMapHead",
@@ -120,11 +131,15 @@ __all__ = [
     "NetworkHead",
     "SimpleAttention",
     "SkipConnectionAligner",
+    # Attention and Fusion
+    "AttentionGate",
+    "FusionHead",
     # Features
     "calculate_fos_features",
     "calculate_simple_glcm_features",
     "get_deep_radiomics_features",
     # Training Utilities
+    "Trainer",
     "EarlyStopping",
     "ModelCheckpoint",
     "TrainingHistory",

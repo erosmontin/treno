@@ -199,7 +199,7 @@ class UNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[64, 128, 256, 512], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True,reduction=2, use_skip_attention=False):
+                 use_attention=True, reduction=16, use_skip_attention=False):
         
         super().__init__()
         
@@ -266,8 +266,9 @@ class UNetPPBase(nn.Module):
     """UNet++ base with nested dense skip connections. Supports 1D/2D/3D."""
     def __init__(self, in_channels, num_filters=[64, 128, 256], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
-                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True, reduction=2):
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True, reduction=16):
         super().__init__()
+        self.dimension = dimension  # Store dimension for use in forward_features
         _, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
         self.pool = MaxPoolNd(kernel_size=2, stride=2)
         self.num_filters = num_filters
@@ -412,7 +413,7 @@ class LeNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[16, 32, 64], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True,reduction=2):
+                 use_attention=True, reduction=16):
         """LeNet base architecture with configurable parameters."""
         if len(num_filters) < 2:
             raise ValueError("LeNet requires at least 2 filter sizes")
@@ -937,7 +938,7 @@ class EMUNet(nn.Module):
                  use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False,
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1], reduction=2,
+                 use_radiomics=False, num_bins=256, radii=[1], reduction=16,
                  use_skip_attention=False):
         super().__init__()
         
@@ -1053,7 +1054,7 @@ class EMLeNet(nn.Module):
                  task='regression', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1],reduction=2):
+                 use_radiomics=False, num_bins=256, radii=[1], reduction=16):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -1621,6 +1622,483 @@ class EMResNet(nn.Module):
         features = self.encoder.forward_features(x)
         radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
         return features, radiomics_features
+
+
+# ============================================================================
+# DUAL-HEAD MODEL (Joint Segmentation + Classification)
+# ============================================================================
+
+class EMDualHead(nn.Module):
+    """
+    Dual-head model for simultaneous segmentation and classification/regression.
+    
+    This model shares a U-Net encoder-decoder backbone and produces both:
+    - Segmentation mask (pixel/voxel-level predictions)
+    - Classification/regression output (image-level predictions)
+    
+    Useful for medical imaging tasks where you need both:
+    - Segment the tumor AND classify its grade
+    - Segment the lesion AND predict patient outcome
+    - Segment anatomy AND measure a continuous biomarker
+    
+    Args:
+        in_channels: Number of input channels
+        seg_classes: Number of segmentation classes
+        cls_classes: Number of classification classes (or 1 for regression)
+        dimension: Spatial dimension (1, 2, or 3)
+        num_filters: List of filter counts per encoder level
+        cls_task: 'classification' or 'regression' for the classification head
+        fc_layers: Fully connected layer sizes for classification head
+        use_batchnorm: Whether to use batch normalization
+        activation: Activation function name
+        dropout_rate: Dropout probability
+        leaky_slope: Negative slope for LeakyReLU
+        bias: Whether to use bias
+        use_attention: Whether to use CBAM attention
+        use_skip_attention: Whether to use attention gates on skip connections
+        extra_params_dim: Dimension of extra parameters (age, TR, TE, etc.)
+        use_radiomics: Whether to compute radiomics features
+        num_bins: Number of bins for FOS histogram
+        radii: List of radii for GLCM computation
+        seg_weight: Weight for segmentation loss in combined loss (default 1.0)
+        cls_weight: Weight for classification loss in combined loss (default 1.0)
+    
+    Example:
+        >>> # Segment tumor (4 classes) AND classify grade (3 classes)
+        >>> model = EMDualHead(
+        ...     in_channels=1,
+        ...     seg_classes=4,
+        ...     cls_classes=3,
+        ...     dimension=3,
+        ...     cls_task='classification'
+        ... )
+        >>> x = torch.randn(2, 1, 64, 64, 64)
+        >>> seg_out, cls_out = model(x)
+        >>> # seg_out: [2, 4, 64, 64, 64], cls_out: [2, 3]
+        >>> 
+        >>> # Combined loss
+        >>> seg_loss = F.cross_entropy(seg_out, seg_target)
+        >>> cls_loss = F.cross_entropy(cls_out, cls_target)
+        >>> loss = model.seg_weight * seg_loss + model.cls_weight * cls_loss
+    """
+    def __init__(self, in_channels, seg_classes, cls_classes, dimension=2,
+                 num_filters=[64, 128, 256], cls_task='classification',
+                 fc_layers=[512, 256], use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False,
+                 use_attention=True, use_skip_attention=False, reduction=16,
+                 extra_params_dim=0, use_radiomics=False, num_bins=256, radii=[1],
+                 seg_weight=1.0, cls_weight=1.0):
+        super().__init__()
+        
+        if in_channels <= 0 or seg_classes <= 0 or cls_classes <= 0:
+            raise ValueError("Channels and classes must be positive")
+        if cls_task not in ['classification', 'regression']:
+            raise ValueError("cls_task must be 'classification' or 'regression'")
+        
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.seg_classes = seg_classes
+        self.cls_classes = cls_classes
+        self.cls_task = cls_task
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
+        self.extra_params_dim = extra_params_dim
+        self.seg_weight = seg_weight
+        self.cls_weight = cls_weight
+        
+        # Shared encoder-decoder backbone (U-Net)
+        self.base = UNetBase(
+            in_channels, num_filters, dimension, 3, use_batchnorm,
+            activation, dropout_rate, leaky_slope, bias, False, use_attention, reduction,
+            use_skip_attention
+        )
+        
+        # Radiomics computation
+        num_directions = dimension
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        
+        # Segmentation head (operates on decoder output)
+        self.seg_head = NetworkHead(
+            num_filters[0], seg_classes, dimension, 'segmentation', [],
+            dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim
+        )
+        
+        # Classification head (operates on bottleneck features)
+        # Uses global average pooling on bottleneck
+        bottleneck_channels = num_filters[-1] * 2  # bottleneck doubles the last filter count
+        self.cls_head = NetworkHead(
+            bottleneck_channels, cls_classes, dimension, cls_task, fc_layers,
+            dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim
+        )
+        
+        # Optional fusion modules
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.seg_fusion = FusionHead(num_filters[0], extra_params_dim)
+            self.cls_fusion = FusionHead(bottleneck_channels, extra_params_dim)
+    
+    def _compute_radiomics(self, x):
+        """Compute radiomics features (FOS + GLCM) for each channel."""
+        stats_features = []
+        for i in range(x.shape[0]):
+            channelfeatures = []
+            for j in range(self.in_channels):
+                fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                combined = torch.cat((fos, glcm))
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
+                channelfeatures.append(combined)
+            stats_features.append(torch.cat(channelfeatures))
+        return torch.stack(stats_features)
+    
+    def forward(self, x, extra_params=None):
+        """
+        Forward pass returning both segmentation and classification outputs.
+        
+        Args:
+            x: Input tensor [B, C, ...]
+            extra_params: Optional extra parameters [B, extra_params_dim]
+        
+        Returns:
+            Tuple of (segmentation_output, classification_output)
+            - segmentation_output: [B, seg_classes, ...]
+            - classification_output: [B, cls_classes]
+        """
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        
+        if extra_params is not None and self.extra_params_dim > 0:
+            if extra_params.shape[1] != self.extra_params_dim:
+                raise ValueError(f"extra_params dim ({extra_params.shape[1]}) != expected ({self.extra_params_dim})")
+        
+        # Compute radiomics if enabled
+        radiomics_features = None
+        if self.use_radiomics:
+            radiomics_features = self._compute_radiomics(x)
+        
+        # Encoder pass
+        bottleneck_input, skip_connections = self.base.forward_features(x)
+        bottleneck = self.base.bottleneck(bottleneck_input)
+        
+        # Decoder pass for segmentation
+        decoder_out = bottleneck
+        skip_connections = skip_connections[::-1]
+        for i, up in enumerate(self.base.ups):
+            decoder_out = up[0](decoder_out)
+            skip = skip_connections[i]
+            if decoder_out.shape[2:] != skip.shape[2:]:
+                mode = 'linear' if len(decoder_out.shape) == 3 else 'bilinear' if len(decoder_out.shape) == 4 else 'trilinear'
+                decoder_out = F.interpolate(decoder_out, size=skip.shape[2:], mode=mode, align_corners=False)
+            if self.base.use_skip_attention:
+                skip = self.base.skip_gates[i](skip, decoder_out)
+            decoder_out = torch.cat([skip, decoder_out], dim=1)
+            decoder_out = up[1](decoder_out)
+        
+        # Apply fusion if extra_params provided
+        seg_features = decoder_out
+        cls_features = bottleneck
+        
+        if extra_params is not None and self.use_fusion:
+            seg_features = self.seg_fusion(seg_features, extra_params)
+            cls_features = self.cls_fusion(cls_features, extra_params)
+        
+        # Segmentation output
+        seg_out = self.seg_head(seg_features, radiomics_features, extra_params)
+        
+        # Classification output (from bottleneck)
+        cls_out = self.cls_head(cls_features, radiomics_features, extra_params)
+        
+        return seg_out, cls_out
+    
+    def forward_segmentation(self, x, extra_params=None):
+        """Return only segmentation output."""
+        seg_out, _ = self.forward(x, extra_params)
+        return seg_out
+    
+    def forward_classification(self, x, extra_params=None):
+        """Return only classification output."""
+        _, cls_out = self.forward(x, extra_params)
+        return cls_out
+    
+    def extract_features(self, x):
+        """Extract bottleneck features, skip connections, and radiomics."""
+        bottleneck_input, skip_connections = self.base.forward_features(x)
+        bottleneck = self.base.bottleneck(bottleneck_input)
+        radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
+        return bottleneck, skip_connections, radiomics_features
+
+
+# ============================================================================
+# AUTOENCODER (Latent Space Learning / Anomaly Detection)
+# ============================================================================
+
+class EMAutoEncoder(nn.Module):
+    """
+    Variational/Deterministic AutoEncoder for unsupervised learning.
+    
+    Use cases:
+    - Unsupervised pretraining for downstream tasks
+    - Anomaly detection (high reconstruction error = anomaly)
+    - Latent space learning for clustering/visualization
+    - Data augmentation via latent space interpolation
+    
+    Supports both deterministic (AE) and variational (VAE) modes.
+    VAE mode adds KL divergence loss for regularized latent space.
+    
+    Args:
+        in_channels: Number of input channels
+        dimension: Spatial dimension (1, 2, or 3)
+        num_filters: List of filter counts per encoder level
+        latent_dim: Dimension of latent space (flattened)
+        variational: If True, use VAE with reparameterization trick
+        use_batchnorm: Whether to use batch normalization
+        activation: Activation function name
+        dropout_rate: Dropout probability
+        leaky_slope: Negative slope for LeakyReLU
+        bias: Whether to use bias
+        use_attention: Whether to use CBAM attention
+        reconstruction_activation: Final activation ('sigmoid', 'tanh', 'none')
+    
+    Example:
+        >>> # Deterministic autoencoder for anomaly detection
+        >>> model = EMAutoEncoder(
+        ...     in_channels=1,
+        ...     dimension=3,
+        ...     num_filters=[32, 64, 128],
+        ...     latent_dim=256,
+        ...     variational=False
+        ... )
+        >>> x = torch.randn(2, 1, 64, 64, 64)
+        >>> recon, latent = model(x)
+        >>> recon_loss = F.mse_loss(recon, x)
+        >>> 
+        >>> # VAE with KL loss
+        >>> vae = EMAutoEncoder(..., variational=True)
+        >>> recon, latent, mu, logvar = vae(x)
+        >>> recon_loss = F.mse_loss(recon, x)
+        >>> kl_loss = vae.kl_divergence(mu, logvar)
+        >>> loss = recon_loss + 0.001 * kl_loss
+    """
+    def __init__(self, in_channels, dimension=2, num_filters=[64, 128, 256],
+                 latent_dim=256, variational=False, use_batchnorm=True,
+                 activation='leaky_relu', dropout_rate=0.0, leaky_slope=0.1,
+                 bias=False, use_attention=True, reconstruction_activation='sigmoid'):
+        super().__init__()
+        
+        if in_channels <= 0:
+            raise ValueError("in_channels must be positive")
+        if latent_dim <= 0:
+            raise ValueError("latent_dim must be positive")
+        
+        self.dimension = dimension
+        self.in_channels = in_channels
+        self.num_filters = num_filters
+        self.latent_dim = latent_dim
+        self.variational = variational
+        self.reconstruction_activation = reconstruction_activation
+        
+        ConvNd, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
+        
+        # Encoder
+        self.encoder_blocks = nn.ModuleList()
+        self.pool = MaxPoolNd(kernel_size=2, stride=2)
+        current_channels = in_channels
+        for filters in num_filters:
+            self.encoder_blocks.append(BaseConvBlock(
+                current_channels, filters, dimension, 3, 1,
+                use_batchnorm, activation, dropout_rate, leaky_slope, bias,
+                False, use_attention, 16
+            ))
+            current_channels = filters
+        
+        # Bottleneck convolution
+        self.bottleneck_conv = BaseConvBlock(
+            num_filters[-1], num_filters[-1], dimension, 3, 1,
+            use_batchnorm, activation, dropout_rate, leaky_slope, bias,
+            False, use_attention, 16
+        )
+        
+        # Global average pooling for latent space
+        self.gap = {1: nn.AdaptiveAvgPool1d(1), 2: nn.AdaptiveAvgPool2d(1), 3: nn.AdaptiveAvgPool3d(1)}[dimension]
+        
+        # Latent space projection
+        if variational:
+            self.fc_mu = nn.Linear(num_filters[-1], latent_dim)
+            self.fc_logvar = nn.Linear(num_filters[-1], latent_dim)
+        else:
+            self.fc_latent = nn.Linear(num_filters[-1], latent_dim)
+        
+        # Decoder projection (latent -> spatial)
+        # We'll upsample from 1x1x... to match encoder output size
+        self.fc_decode = nn.Linear(latent_dim, num_filters[-1])
+        
+        # Decoder
+        self.decoder_blocks = nn.ModuleList()
+        reversed_filters = list(reversed(num_filters))
+        for i in range(len(reversed_filters) - 1):
+            in_f = reversed_filters[i]
+            out_f = reversed_filters[i + 1]
+            self.decoder_blocks.append(nn.Sequential(
+                ConvTransposeNd(in_f, out_f, kernel_size=2, stride=2),
+                BaseConvBlock(out_f, out_f, dimension, 3, 1,
+                             use_batchnorm, activation, dropout_rate, leaky_slope, bias,
+                             False, use_attention, 16)
+            ))
+        
+        # Final upsample + reconstruction
+        self.final_upsample = ConvTransposeNd(reversed_filters[-1], reversed_filters[-1], kernel_size=2, stride=2)
+        self.reconstruction_head = ConvNd(reversed_filters[-1], in_channels, kernel_size=1, bias=bias)
+        
+        # Final activation
+        activation_dict = {
+            'sigmoid': nn.Sigmoid(),
+            'tanh': nn.Tanh(),
+            'none': nn.Identity()
+        }
+        self.final_activation = activation_dict.get(reconstruction_activation.lower(), nn.Identity())
+        
+        # Store encoder spatial shapes for decoder
+        self._encoder_shapes = []
+    
+    def encode(self, x):
+        """Encode input to latent space."""
+        self._encoder_shapes = [x.shape[2:]]  # Store input spatial shape
+        
+        for block in self.encoder_blocks:
+            x = block(x)
+            self._encoder_shapes.append(x.shape[2:])
+            x = self.pool(x)
+        
+        x = self.bottleneck_conv(x)
+        
+        # Global pooling
+        x = self.gap(x)
+        x = torch.flatten(x, 1)
+        
+        if self.variational:
+            mu = self.fc_mu(x)
+            logvar = self.fc_logvar(x)
+            return mu, logvar
+        else:
+            latent = self.fc_latent(x)
+            return latent
+    
+    def reparameterize(self, mu, logvar):
+        """Reparameterization trick for VAE."""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z, target_shape=None):
+        """Decode latent vector to reconstruction."""
+        batch_size = z.shape[0]
+        
+        # Project latent to feature space
+        x = self.fc_decode(z)
+        
+        # Reshape to spatial tensor [B, C, 1, 1, ...] 
+        spatial_ones = [1] * self.dimension
+        x = x.view(batch_size, self.num_filters[-1], *spatial_ones)
+        
+        # Upsample through decoder
+        for i, block in enumerate(self.decoder_blocks):
+            # Get target shape from encoder (reversed order, skip last which is input shape)
+            shape_idx = len(self._encoder_shapes) - 2 - i
+            if shape_idx >= 0 and len(self._encoder_shapes) > shape_idx:
+                target = self._encoder_shapes[shape_idx]
+            else:
+                # Fallback: double spatial dimensions
+                target = tuple(s * 2 for s in x.shape[2:])
+            
+            x = block[0](x)  # ConvTranspose
+            # Interpolate to match encoder shape if needed
+            if x.shape[2:] != target:
+                mode = 'linear' if self.dimension == 1 else 'bilinear' if self.dimension == 2 else 'trilinear'
+                x = F.interpolate(x, size=target, mode=mode, align_corners=False)
+            x = block[1](x)  # BaseConvBlock
+        
+        # Final upsample to input size
+        x = self.final_upsample(x)
+        if target_shape is not None or (len(self._encoder_shapes) > 0 and x.shape[2:] != self._encoder_shapes[0]):
+            target = target_shape if target_shape else self._encoder_shapes[0]
+            mode = 'linear' if self.dimension == 1 else 'bilinear' if self.dimension == 2 else 'trilinear'
+            x = F.interpolate(x, size=target, mode=mode, align_corners=False)
+        
+        x = self.reconstruction_head(x)
+        x = self.final_activation(x)
+        return x
+    
+    def forward(self, x):
+        """
+        Forward pass.
+        
+        Returns:
+            - Deterministic AE: (reconstruction, latent)
+            - VAE: (reconstruction, latent, mu, logvar)
+        """
+        expected_dims = self.dimension + 2
+        if x.dim() != expected_dims:
+            raise ValueError(f"Expected {self.dimension}D input with shape [B, C, ...], got {x.shape}")
+        if x.shape[1] != self.in_channels:
+            raise ValueError(f"Expected {self.in_channels} input channels, got {x.shape[1]}")
+        
+        input_shape = x.shape[2:]
+        
+        if self.variational:
+            mu, logvar = self.encode(x)
+            z = self.reparameterize(mu, logvar)
+            recon = self.decode(z, target_shape=input_shape)
+            return recon, z, mu, logvar
+        else:
+            z = self.encode(x)
+            recon = self.decode(z, target_shape=input_shape)
+            return recon, z
+    
+    @staticmethod
+    def kl_divergence(mu, logvar):
+        """
+        Compute KL divergence for VAE.
+        KL(q(z|x) || p(z)) where p(z) = N(0, I)
+        """
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+    
+    def reconstruction_loss(self, x, recon, loss_type='mse'):
+        """Compute reconstruction loss."""
+        if loss_type == 'mse':
+            return F.mse_loss(recon, x)
+        elif loss_type == 'l1':
+            return F.l1_loss(recon, x)
+        elif loss_type == 'bce':
+            return F.binary_cross_entropy(recon, x)
+        else:
+            raise ValueError(f"Unknown loss_type: {loss_type}")
+    
+    def anomaly_score(self, x):
+        """
+        Compute anomaly score based on reconstruction error.
+        Higher score = more anomalous.
+        """
+        with torch.no_grad():
+            if self.variational:
+                recon, _, _, _ = self.forward(x)
+            else:
+                recon, _ = self.forward(x)
+            # Per-sample MSE
+            mse = ((x - recon) ** 2).view(x.shape[0], -1).mean(dim=1)
+        return mse
+    
+    def extract_features(self, x):
+        """Extract latent features for downstream tasks."""
+        if self.variational:
+            mu, logvar = self.encode(x)
+            return mu, logvar
+        else:
+            return self.encode(x), None
+
 
 def get_deep_radiomics_features(model, x, extra_params=None, pool='avg', include_engineered=True):
     """Return a [B, F] vector of deep radiomics features for any model.

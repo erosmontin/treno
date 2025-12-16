@@ -6,7 +6,7 @@ allow-direct-references = true
 
 [project]
 name = "treno"
-version = "3.5.0.2"
+version = "3.5.0.3"
 authors = [
   { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
 ]
