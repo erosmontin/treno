@@ -105,11 +105,11 @@ class ChannelAttention(nn.Module):
             2: nn.AdaptiveAvgPool2d(1),
             3: nn.AdaptiveAvgPool3d(1)
         }[dimension]
-        
+        reduced_channels = max(in_channels // reduction, 1)
         self.fc = nn.Sequential(
-            nn.Linear(in_channels, in_channels // reduction, bias=False),
+            nn.Linear(in_channels,reduced_channels , bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(in_channels // reduction, in_channels, bias=False)
+            nn.Linear(reduced_channels, in_channels, bias=False)
         )
         self.sigmoid = nn.Sigmoid()
 
