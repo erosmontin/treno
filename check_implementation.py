@@ -51,11 +51,8 @@ except FileNotFoundError:
 # Check 4: Documentation
 print("✓ Checking documentation files...")
 docs = [
-    ('ND_COMPREHENSIVE_GUIDE.md', 'ND guide'),
-    ('IMPLEMENTATION_SUMMARY.md', 'Implementation summary'),
-    ('QUICK_REFERENCE.md', 'Quick reference'),
-    ('COMPLETION_REPORT.md', 'Completion report'),
-    ('CHANGELOG_v3.5.0.md', 'Changelog'),
+    ('README.md', 'README'),
+    ('LLM_AGENT_GUIDE.md', 'LLM Agent Guide'),
 ]
 
 missing_docs = []
@@ -121,13 +118,14 @@ else:
 print("="*60)
 print("""
 Summary:
-  - Core models: ✅ (4 existing + 3 new)
-  - 1D models: ✅ (4 new)
-  - Test suite: ✅ (51 test cases)
-  - Documentation: ✅ (5 guides, 2100+ lines)
-  - Examples: ✅ (23+ working examples)
+  - Core models: ✅ (EMUNet, EMUNetPP for segmentation)
+  - Classification/Regression: ✅ (EMLeNet, EMResNet)
+  - 1D models: ✅ (EMUNet1D, UNet1DOptimized)
+  - Map-to-Map: ✅ (EMUNetMapToMap, EMUNetPPMapToMap)
+  - Test suite: ✅ (comprehensive pytest suite)
+  - Documentation: ✅ (README + LLM_AGENT_GUIDE)
+  - Examples: ✅ (working examples)
   - Radiomics: ✅ (Multi-directional GLCM)
-  - Version: ✅ (3.5.0.0)
 
 Ready for production! 🚀
 """)

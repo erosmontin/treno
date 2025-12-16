@@ -55,7 +55,7 @@ pip install -e .
 
 ## 🎯 Quick Start
 
-### Classification (3D Medical Images)
+### Segmentation (Primary U-Net Use Case)
 
 ```python
 from treno import EMUNet
@@ -63,31 +63,33 @@ import torch
 
 model = EMUNet(
     in_channels=1,           # Single channel (CT/MRI)
-    out_channels=5,          # 5 disease classes
+    out_channels=4,          # 4 segmentation classes
     dimension=3,             # 3D volumes
-    task='classification',
     use_radiomics=True,      # Add radiomics features
-    use_attention=True       # Add CBAM attention
+    use_attention=True,      # Add CBAM attention
+    extra_params_dim=3       # Clinical metadata (age, sex, etc.)
 )
 
 x = torch.randn(4, 1, 128, 128, 128)
-output = model(x)  # [4, 5] - class probabilities
+extra = torch.randn(4, 3)  # Clinical data
+mask = model(x, extra)  # [4, 4, 128, 128, 128] - segmentation logits
 ```
 
-### Segmentation
+### High-Quality Segmentation (U-Net++)
 
 ```python
-from treno import EMUNetPP  # U-Net++ for better results
+from treno import EMUNetPP  # Dense skip connections for better results
 
 model = EMUNetPP(
     in_channels=1,
     out_channels=4,          # 4 segmentation classes
     dimension=3,
-    task='segmentation'
+    extra_params_dim=5       # More clinical features
 )
 
 x = torch.randn(2, 1, 128, 128, 128)
-mask = model(x)  # [2, 4, 128, 128, 128]
+extra = torch.randn(2, 5)
+mask = model(x, extra)  # [2, 4, 128, 128, 128]
 ```
 
 ### Map-to-Map (Image Translation)
@@ -98,26 +100,33 @@ from treno import EMUNetMapToMap
 model = EMUNetMapToMap(
     in_channels=1,           # Noisy image
     out_channels=1,          # Clean image
-    dimension=2
+    dimension=2,
+    extra_params_dim=2,      # Conditioned generation
+    use_radiomics=True       # Texture-aware translation
 )
 
 noisy = torch.randn(8, 1, 256, 256)
-clean = model(noisy)  # [8, 1, 256, 256]
+conditions = torch.randn(8, 2)
+clean = model(noisy, conditions)  # [8, 1, 256, 256]
 ```
 
-### 1D Time-Series
+### Classification (Use LeNet/ResNet)
 
 ```python
-from treno import EMUNet1D
+from treno import EMLeNet  # For classification tasks
 
-model = EMUNet1D(
+model = EMLeNet(
     in_channels=1,
-    out_channels=3,
-    task='classification'
+    out_channels=5,          # 5 disease classes
+    dimension=3,
+    task='classification',
+    use_radiomics=True,
+    extra_params_dim=3
 )
 
-signal = torch.randn(32, 1, 2048)
-output = model(signal)  # [32, 3]
+x = torch.randn(4, 1, 128, 128, 128)
+extra = torch.randn(4, 3)
+probs = model(x, extra)  # [4, 5] - class probabilities
 ```
 
 ### Data Loading
@@ -139,40 +148,72 @@ loader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=4)
 for batch in loader:
     images = batch['images']  # [B, C, D, H, W]
     labels = batch['label']   # [B]
+
+```
+
+### Deep Radiomics Feature Extraction
+
+```python
+from treno import EMUNet, get_deep_radiomics_features
+import torch
+
+# After training a model for its task, extract deep radiomics vectors
+model = EMUNet(in_channels=1, out_channels=4, dimension=3, use_radiomics=True)
+model.eval()
+
+x = torch.randn(2, 1, 64, 64, 64)
+
+# Returns [B, F] feature vectors (pooled deep features + engineered radiomics)
+feat = get_deep_radiomics_features(model, x, pool='avg', include_engineered=True)
+print(feat.shape)  # e.g., [2, 64 + R]
 ```
 
 ---
 
 ## 📊 Task Compatibility Matrix
 
-| Task | 1D | 2D | 3D | Models |
+| Task | 1D | 2D | 3D | Recommended Models |
 |------|----|----|----|----|
-| **Classification** | ✅ | ✅ | ✅ | `EMUNet`, `EMUNetPP`, `EMUNet1D` |
-| **Regression** | ✅ | ✅ | ✅ | `EMUNet`, `EMUNetPP`, `EMUNet1D` |
 | **Segmentation** | ✅ | ✅ | ✅ | `EMUNet`, `EMUNetPP` |
-| **Map-to-Map** | ✅ | ✅ | ✅ | `EMUNetMapToMap`, `EMUNetPPMapToMap`, `UNet1DOptimized` |
+| **Image Translation** | ✅ | ✅ | ✅ | `EMUNetMapToMap`, `EMUNetPPMapToMap` |
+| **Classification** | ✅ | ✅ | ✅ | `EMLeNet`, `EMResNet` |
+| **Regression** | ✅ | ✅ | ✅ | `EMLeNet`, `EMResNet` |
 
 ---
 
 ## 🏗️ Model Selection Guide
 
+### Segmentation Models
 | Model | Description | When to Use |
 |-------|-------------|-------------|
-| `EMUNet` | Standard U-Net | Fast baseline, general purpose |
-| `EMUNetPP` | U-Net++ (dense skip connections) | Better accuracy, more parameters |
-| `EMUNet1D` | Full-featured 1D U-Net | Time-series with radiomics |
-| `UNet1DOptimized` | Dilated 1D U-Net | Variable-length sequences |
-| `EMUNetMapToMap` | U-Net for image translation | Denoising, synthesis, style transfer |
-| `EMUNetPPMapToMap` | U-Net++ for reconstruction | Superior image quality |
+| `EMUNet` | Standard U-Net with skip connections | Fast baseline, general purpose segmentation |
+| `EMUNetPP` | U-Net++ with dense nested skips | Better accuracy, more parameters |
+
+### Image Translation Models
+| Model | Description | When to Use |
+|-------|-------------|-------------|
+| `EMUNetMapToMap` | U-Net for map-to-map tasks | Denoising, synthesis, domain transfer |
+| `EMUNetPPMapToMap` | U-Net++ for high-quality reconstruction | Superior image quality, style transfer |
+
+### Classification/Regression Models
+| Model | Description | When to Use |
+|-------|-------------|-------------|
+| `EMLeNet` | Lightweight CNN | Fast inference, smaller datasets |
+| `EMResNet` | Deep residual encoder | Complex features, large datasets |
+
+**All models support:**
+- ✅ 1D/2D/3D inputs
+- ✅ Radiomics features
+- ✅ Extra parameters (clinical metadata)
+- ✅ Fusion gating (when extra_params_dim > 0)
+- ✅ CBAM attention mechanisms
 
 ---
 
 ## 📚 Documentation
 
 - **README.md** (this file) - Overview and quick start
-- **LLM_AGENT_GUIDE.md** - Comprehensive guide for LLM agents building pipelines
-- **GRADCAM_GUIDE.md** - Explainability and visualization
-- **MIGRATION_GUIDE.md** - Migrating from legacy data loaders
+- **LLM_AGENT_GUIDE.md** - Comprehensive guide for LLM agents building pipelines (includes explainability, migration, API reference)
 - **examples/** - Working example scripts
 
 ---
@@ -188,6 +229,18 @@ python examples/example_nd_maptomap.py
 
 # Data loader examples
 python examples/example_new_loader.py
+
+```
+
+---
+
+## Refactoring Highlights (v3.5)
+
+- U-Net family now strictly segmentation-only (clear task separation)
+- Map-to-Map models support conditioned generation via fusion
+- Deep radiomics unified: pooled deep features + engineered radiomics
+- 1D/2D/3D parity across models with consistent APIs
+- Documentation consolidated into this README and LLM guide
 
 # Grad-CAM visualization
 python examples/example_gradcam_saliency.py

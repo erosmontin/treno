@@ -21,11 +21,11 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from models import (
-    EMUNet, EMUNetPP, EMUNetMapToMap, EMUNetPPMapToMap,
+from treno.models import (
+    EMUNet, EMUNetPP, EMLeNet, EMUNetMapToMap, EMUNetPPMapToMap,
     SkipConnectionAligner, calculate_fos_features, calculate_simple_glcm_features
 )
-from unet_1d_optimized import UNet1DOptimized, EMUNet1D
+from treno.unet_1d_optimized import UNet1DOptimized, EMUNet1D
 
 
 class TestDimensionSupport:
@@ -36,9 +36,9 @@ class TestDimensionSupport:
         (2, (2, 3, 64, 64)),
         (3, (2, 3, 32, 32, 32)),
     ])
-    def test_emunet_dimensions(self, dimension, input_shape):
-        """Test EMUNet with 1D, 2D, 3D inputs."""
-        model = EMUNet(
+    def test_emlenet_dimensions(self, dimension, input_shape):
+        """Test EMLeNet with 1D, 2D, 3D inputs for classification."""
+        model = EMLeNet(
             in_channels=3, out_channels=10,
             dimension=dimension, task='classification'
         )
@@ -51,9 +51,9 @@ class TestDimensionSupport:
         (2, (2, 1, 128, 128)),
         (3, (2, 1, 64, 64, 64)),
     ])
-    def test_emunetpp_dimensions(self, dimension, input_shape):
-        """Test EMUNet++ with all dimensions."""
-        model = EMUNetPP(
+    def test_emlenet_regression_dimensions(self, dimension, input_shape):
+        """Test EMLeNet for regression with all dimensions."""
+        model = EMLeNet(
             in_channels=1, out_channels=5,
             dimension=dimension, task='regression'
         )
@@ -66,8 +66,8 @@ class TestTaskSupport:
     """Test all task types across dimensions."""
     
     @pytest.mark.parametrize("task", ['classification', 'regression', 'segmentation', 'map-to-map'])
-    def test_emunet_2d_tasks(self, task):
-        """Test EMUNet with all task types in 2D."""
+    def test_tasks_2d(self, task):
+        """Test all task types in 2D with appropriate models."""
         if task == 'map-to-map':
             model = EMUNetMapToMap(
                 in_channels=1, out_channels=1, dimension=2
@@ -75,17 +75,24 @@ class TestTaskSupport:
             x = torch.randn(2, 1, 64, 64)
             output = model(x)
             assert output.shape == (2, 1, 64, 64)
-        else:
+        elif task == 'segmentation':
+            # EMUNet is segmentation-only
             model = EMUNet(
+                in_channels=1, out_channels=5,
+                dimension=2
+            )
+            x = torch.randn(2, 1, 64, 64)
+            output = model(x)
+            assert output.shape == (2, 5, 64, 64)
+        else:
+            # classification/regression use EMLeNet
+            model = EMLeNet(
                 in_channels=1, out_channels=5 if task == 'classification' else 1,
                 dimension=2, task=task
             )
             x = torch.randn(2, 1, 64, 64)
             output = model(x)
-            if task == 'segmentation':
-                assert output.shape == (2, 5, 64, 64)
-            else:
-                assert output.shape[0] == 2
+            assert output.shape[0] == 2
     
     @pytest.mark.parametrize("task,output_channels", [
         ('classification', 3),
@@ -149,7 +156,7 @@ class TestRadiomicsFeatures:
     
     def test_radiomics_in_model_2d(self):
         """Test radiomics computation in model forward pass."""
-        model = EMUNet(
+        model = EMLeNet(
             in_channels=2, out_channels=3, dimension=2,
             task='classification', use_radiomics=True
         )
@@ -159,7 +166,7 @@ class TestRadiomicsFeatures:
     
     def test_radiomics_in_model_3d(self):
         """Test radiomics in 3D model."""
-        model = EMUNet(
+        model = EMLeNet(
             in_channels=1, out_channels=5, dimension=3,
             task='regression', use_radiomics=True, num_bins=32
         )
@@ -176,7 +183,7 @@ class TestExtraParameters:
         """Test extra parameters in classification."""
         shapes = {1: (2, 1, 128), 2: (2, 1, 64, 64), 3: (2, 1, 32, 32, 32)}
         
-        model = EMUNet(
+        model = EMLeNet(
             in_channels=1, out_channels=4, dimension=dimension,
             task='classification', extra_params_dim=3
         )
@@ -194,7 +201,7 @@ class TestExtraParameters:
         
         model = EMUNet(
             in_channels=1, out_channels=5, dimension=dimension,
-            task='segmentation', extra_params_dim=2
+            extra_params_dim=2  # EMUNet is segmentation-only
         )
         x = torch.randn(*shapes[dimension])
         extra = torch.randn(2, 2)

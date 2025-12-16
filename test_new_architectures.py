@@ -65,14 +65,14 @@ print(f"  ✅ 3D regression: input={x3d_reg.shape}, extra={extra3d.shape}, outpu
 print("\n2. EMUNetPP (UNet++ 1D/2D/3D)")
 print("-"*70)
 
-# 1D segmentation
-upp1d = EMUNetPP(in_channels=1, out_channels=3, dimension=1, task='segmentation')
+# 1D segmentation (EMUNetPP is segmentation-only)
+upp1d = EMUNetPP(in_channels=1, out_channels=3, dimension=1)  # No task param
 x1d_seg = torch.randn(2, 1, 128)
 y1d_seg = upp1d(x1d_seg)
 print(f"  ✅ 1D segmentation: input={x1d_seg.shape}, output={y1d_seg.shape}")
 
-# 2D segmentation with radiomics and extra_params
-upp2d = EMUNetPP(in_channels=1, out_channels=4, dimension=2, task='segmentation',
+# 2D segmentation with radiomics and extra_params (EMUNetPP is segmentation-only)
+upp2d = EMUNetPP(in_channels=1, out_channels=4, dimension=2,  # No task param
                  use_radiomics=True, extra_params_dim=3)
 x2d_seg = torch.randn(2, 1, 32, 32)
 extra_seg = torch.randn(2, 3)
@@ -81,23 +81,23 @@ loss_seg = torch.nn.CrossEntropyLoss()(y2d_seg, torch.randint(0, 4, (2, 32, 32))
 loss_seg.backward()
 print(f"  ✅ 2D segmentation: input={x2d_seg.shape}, output={y2d_seg.shape}, loss={loss_seg.item():.4f}")
 
-# 2D classification (using UNet++ encoder)
-upp2d_clf = EMUNetPP(in_channels=1, out_channels=5, dimension=2, task='classification')
-y2d_upp_clf = upp2d_clf(torch.randn(4, 1, 32, 32))
-print(f"  ✅ 2D classification: output={y2d_upp_clf.shape}")
+# 2D classification now uses EMResNet (not UNet++)
+resnet2d_clf = EMResNet(in_channels=1, out_channels=5, dimension=2, task='classification')
+y2d_res_clf = resnet2d_clf(torch.randn(4, 1, 32, 32))
+print(f"  ✅ 2D classification (EMResNet): output={y2d_res_clf.shape}")
 
-# 3D segmentation
-upp3d = EMUNetPP(in_channels=1, out_channels=3, dimension=3, task='segmentation')
+# 3D segmentation (EMUNetPP is segmentation-only)
+upp3d = EMUNetPP(in_channels=1, out_channels=3, dimension=3)  # No task param
 x3d_seg = torch.randn(1, 1, 16, 16, 16)
 y3d_seg = upp3d(x3d_seg)
 print(f"  ✅ 3D segmentation: input={x3d_seg.shape}, output={y3d_seg.shape}")
 
-# 3D regression
-upp3d_reg = EMUNetPP(in_channels=2, out_channels=2, dimension=3, task='regression',
-                     use_radiomics=True)
-x3d_upp_reg = torch.randn(2, 2, 16, 16, 16)
-y3d_upp_reg = upp3d_reg(x3d_upp_reg)
-print(f"  ✅ 3D regression: input={x3d_upp_reg.shape}, output={y3d_upp_reg.shape}")
+# 3D regression uses EMResNet (not UNet++)
+resnet3d_reg = EMResNet(in_channels=2, out_channels=2, dimension=3, task='regression',
+                        use_radiomics=True)
+x3d_res_reg = torch.randn(2, 2, 16, 16, 16)
+y3d_res_reg = resnet3d_reg(x3d_res_reg)
+print(f"  ✅ 3D regression (EMResNet): input={x3d_res_reg.shape}, output={y3d_res_reg.shape}")
 
 # ============================================================================
 # TEST 3: AttentionGate + EMUNet with skip attention
@@ -105,19 +105,19 @@ print(f"  ✅ 3D regression: input={x3d_upp_reg.shape}, output={y3d_upp_reg.shap
 print("\n3. AttentionGate (Attention U-Net)")
 print("-"*70)
 
-# 2D segmentation with skip attention
-u_attn2d = EMUNet(in_channels=1, out_channels=4, dimension=2, task='segmentation',
+# 2D segmentation with skip attention (EMUNet is segmentation-only)
+u_attn2d = EMUNet(in_channels=1, out_channels=4, dimension=2,  # No task param
                   use_skip_attention=True)
 x_attn2d = torch.randn(2, 1, 32, 32)
 y_attn2d = u_attn2d(x_attn2d)
-params_no_skip = sum(p.numel() for p in EMUNet(1, 4, 2, task='segmentation', use_skip_attention=False).parameters())
+params_no_skip = sum(p.numel() for p in EMUNet(1, 4, 2, use_skip_attention=False).parameters())
 params_skip = sum(p.numel() for p in u_attn2d.parameters())
 print(f"  ✅ 2D with skip attention: output={y_attn2d.shape}")
 print(f"     Without skip gates: {params_no_skip:,} params")
 print(f"     With skip gates:    {params_skip:,} params (+{params_skip-params_no_skip:,})")
 
-# 3D segmentation with skip attention
-u_attn3d = EMUNet(in_channels=1, out_channels=3, dimension=3, task='segmentation',
+# 3D segmentation with skip attention (EMUNet is segmentation-only)
+u_attn3d = EMUNet(in_channels=1, out_channels=3, dimension=3,  # No task param
                   use_skip_attention=True, use_radiomics=True, extra_params_dim=2)
 x_attn3d = torch.randn(2, 1, 16, 16, 16)
 extra_attn = torch.randn(2, 2)
@@ -130,27 +130,20 @@ print(f"  ✅ 3D with skip attention + radiomics: output={y_attn3d.shape}")
 print("\n4. FusionHead (Multimodal Fusion)")
 print("-"*70)
 
-# Concat fusion
-fh_concat = FusionHead(img_features=512, extra_params_dim=5, out_channels=10,
-                      fusion_type='concat', hidden_dims=[128, 64])
-img_feat = torch.randn(4, 512)
-clinical = torch.randn(4, 5)
-out_concat = fh_concat(img_feat, clinical)
-print(f"  ✅ Concat fusion: img={img_feat.shape}, clinical={clinical.shape}, output={out_concat.shape}")
+# FusionHead API: FusionHead(in_channels, extra_dim, hidden=[64,64], activation='relu')
+fh = FusionHead(in_channels=128, extra_dim=5, hidden=[64, 32])
+img_feat = torch.randn(4, 128, 8, 8)  # [B, C, H, W]
+clinical = torch.randn(4, 5)  # [B, extra_dim]
+out_fh = fh(img_feat, clinical)
+print(f"  ✅ FusionHead: img={img_feat.shape}, clinical={clinical.shape}, output={out_fh.shape}")
+assert out_fh.shape == img_feat.shape, "FusionHead should preserve spatial dimensions"
 
-# Gated fusion
-fh_gated = FusionHead(img_features=256, extra_params_dim=3, out_channels=5,
-                     fusion_type='gated', hidden_dims=[64, 32], dropout_rate=0.2)
-img_feat2 = torch.randn(8, 256)
-clinical2 = torch.randn(8, 3)
-out_gated = fh_gated(img_feat2, clinical2)
-print(f"  ✅ Gated fusion: img={img_feat2.shape}, clinical={clinical2.shape}, output={out_gated.shape}")
-
-# Test gating effect
-with torch.no_grad():
-    out_no_gate = fh_gated.img_proj(img_feat2)
-    diff = (out_gated - out_no_gate).abs().max().item()
-print(f"     Gating modulation effect: {diff:.6f} (should be non-zero)")
+# Test 3D fusion
+fh_3d = FusionHead(in_channels=64, extra_dim=3, hidden=[32])
+img_feat_3d = torch.randn(2, 64, 8, 8, 8)  # [B, C, D, H, W]
+clinical_3d = torch.randn(2, 3)
+out_fh_3d = fh_3d(img_feat_3d, clinical_3d)
+print(f"  ✅ FusionHead 3D: img={img_feat_3d.shape}, clinical={clinical_3d.shape}, output={out_fh_3d.shape}")
 
 # ============================================================================
 # TEST 5: Combined Features Test
@@ -167,8 +160,8 @@ y_full = m_full(x_full, extra_params=extra_full)
 params_full = sum(p.numel() for p in m_full.parameters())
 print(f"  ✅ EMResNet (radiomics + extra_params): output={y_full.shape}, params={params_full:,}")
 
-# EMUNetPP with all features
-upp_full = EMUNetPP(in_channels=1, out_channels=5, dimension=3, task='segmentation',
+# EMUNetPP with all features (segmentation-only)
+upp_full = EMUNetPP(in_channels=1, out_channels=5, dimension=3,  # No task param
                     use_radiomics=True, extra_params_dim=4, use_attention=True)
 x_upp_full = torch.randn(1, 1, 16, 16, 16)
 extra_upp = torch.randn(1, 4)
@@ -176,8 +169,8 @@ y_upp_full = upp_full(x_upp_full, extra_params=extra_upp)
 params_upp_full = sum(p.numel() for p in upp_full.parameters())
 print(f"  ✅ EMUNetPP (radiomics + extra_params + CBAM): output={y_upp_full.shape}, params={params_upp_full:,}")
 
-# EMUNet with skip attention + all features
-u_full = EMUNet(in_channels=1, out_channels=4, dimension=2, task='segmentation',
+# EMUNet with skip attention + all features (segmentation-only)
+u_full = EMUNet(in_channels=1, out_channels=4, dimension=2,  # No task param
                 use_skip_attention=True, use_radiomics=True, extra_params_dim=3,
                 use_attention=True, use_residual=True)
 x_u_full = torch.randn(2, 1, 32, 32)
@@ -224,7 +217,7 @@ print("-"*70)
 import tempfile
 import os
 
-# Test ResNet save/load
+# Test ResNet save/load (using native torch)
 m_save = EMResNet(in_channels=1, out_channels=3, dimension=2, task='classification')
 m_save.eval()
 x_save = torch.randn(2, 1, 32, 32)
@@ -234,9 +227,10 @@ with torch.no_grad():
 with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as f:
     path = f.name
 
-save_model(m_save, path)
+torch.save(m_save.state_dict(), path)
 m_loaded = EMResNet(in_channels=1, out_channels=3, dimension=2, task='classification')
-load_model(m_loaded, path)
+m_loaded.load_state_dict(torch.load(path, weights_only=True))
+m_loaded.eval()
 
 with torch.no_grad():
     out_loaded = m_loaded(x_save)
@@ -248,8 +242,8 @@ if diff < 1e-6:
 else:
     print(f"  ⚠️  EMResNet save/load: diff={diff:.2e} (use .eval() for exact match)")
 
-# Test UNet++ save/load
-upp_save = EMUNetPP(in_channels=1, out_channels=4, dimension=2, task='segmentation')
+# Test UNet++ save/load (segmentation-only)
+upp_save = EMUNetPP(in_channels=1, out_channels=4, dimension=2)  # No task param
 upp_save.eval()
 x_upp_save = torch.randn(2, 1, 32, 32)
 with torch.no_grad():
@@ -258,9 +252,10 @@ with torch.no_grad():
 with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as f:
     path_upp = f.name
 
-save_model(upp_save, path_upp)
-upp_loaded = EMUNetPP(in_channels=1, out_channels=4, dimension=2, task='segmentation')
-load_model(upp_loaded, path_upp)
+torch.save(upp_save.state_dict(), path_upp)
+upp_loaded = EMUNetPP(in_channels=1, out_channels=4, dimension=2)  # No task param
+upp_loaded.load_state_dict(torch.load(path_upp, weights_only=True))
+upp_loaded.eval()
 
 with torch.no_grad():
     out_upp_loaded = upp_loaded(x_upp_save)
@@ -278,7 +273,7 @@ print("="*70)
 
 print("\nSUMMARY:")
 print("  • EMResNet: 1D/2D/3D classification & regression ✓")
-print("  • EMUNetPP: 1D/2D/3D segmentation, classification & regression ✓")
+print("  • EMUNetPP: 1D/2D/3D segmentation-only ✓")
 print("  • AttentionGate: Skip attention for U-Net variants ✓")
 print("  • FusionHead: Concat & gated multimodal fusion ✓")
 print("  • All features work: radiomics + extra_params + attention + residual ✓")

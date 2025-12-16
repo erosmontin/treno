@@ -11,7 +11,7 @@ print("="*70)
 print("\n1. CLASSIFICATION (Binary + Multiclass)")
 print("-"*70)
 for n_classes in [2, 3, 10, 100]:
-    model = EMUNet(in_channels=1, out_channels=n_classes, dimension=2, task='classification')
+    model = EMLeNet(in_channels=1, out_channels=n_classes, dimension=2, task='classification')
     x = torch.randn(4, 1, 32, 32)
     out = model(x)
     loss = torch.nn.CrossEntropyLoss()(out, torch.randint(0, n_classes, (4,)))
@@ -21,64 +21,64 @@ for n_classes in [2, 3, 10, 100]:
 # TEST 2: Regression
 print("\n2. REGRESSION")
 print("-"*70)
-model = EMUNet(in_channels=1, out_channels=1, dimension=2, task='regression')
+model = EMLeNet(in_channels=1, out_channels=1, dimension=2, task='regression')
 x = torch.randn(4, 1, 32, 32)
 out = model(x)
 loss = torch.nn.MSELoss()(out, torch.randn(4, 1))
 loss.backward()
 print(f"  ✅ Single output: shape={out.shape}, loss={loss.item():.4f}")
 
-model_multi = EMUNet(in_channels=1, out_channels=5, dimension=2, task='regression')
+model_multi = EMLeNet(in_channels=1, out_channels=5, dimension=2, task='regression')
 out_multi = model_multi(torch.randn(4, 1, 32, 32))
 print(f"  ✅ Multi-output: shape={out_multi.shape}")
 
-# TEST 3: Segmentation  
+# TEST 3: Segmentation (EMUNet is segmentation-only)
 print("\n3. SEGMENTATION")
 print("-"*70)
-model_2d = EMUNet(in_channels=1, out_channels=4, dimension=2, task='segmentation')
+model_2d = EMUNet(in_channels=1, out_channels=4, dimension=2)  # EMUNet is segmentation-only
 x = torch.randn(2, 1, 32, 32)
 out_2d = model_2d(x)
 loss = torch.nn.CrossEntropyLoss()(out_2d, torch.randint(0, 4, (2, 32, 32)))
 loss.backward()
 print(f"  ✅ 2D segmentation: shape={out_2d.shape}, preserves_spatial=True")
 
-model_3d_seg = EMUNet(in_channels=1, out_channels=3, dimension=3, task='segmentation')
+model_3d_seg = EMUNet(in_channels=1, out_channels=3, dimension=3)  # EMUNet is segmentation-only
 out_3d_seg = model_3d_seg(torch.randn(2, 1, 16, 16, 16))
 print(f"  ✅ 3D segmentation: shape={out_3d_seg.shape}")
 
-# TEST 4: 3D Support (All Tasks)
+# TEST 4: 3D Support (All Dimensions) - Use EMLeNet for classification
 print("\n4. 3D SUPPORT (All Dimensions)")
 print("-"*70)
-model_3d_clf = EMUNet(in_channels=1, out_channels=5, dimension=3, task='classification')
+model_3d_clf = EMLeNet(in_channels=1, out_channels=5, dimension=3, task='classification')
 out_3d = model_3d_clf(torch.randn(2, 1, 16, 16, 16))
 print(f"  ✅ 3D classification: {out_3d.shape}")
 
-model_1d = EMUNet(in_channels=1, out_channels=3, dimension=1, task='classification')
+model_1d = EMLeNet(in_channels=1, out_channels=3, dimension=1, task='classification')
 out_1d = model_1d(torch.randn(4, 1, 64))
 print(f"  ✅ 1D classification: {out_1d.shape}")
 
 # TEST 5: Extra Parameters (Scalars like age, TR, TE)
 print("\n5. EXTRA PARAMETERS (Scalars: age, sex, TR, TE)")
 print("-"*70)
-model_ep = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', extra_params_dim=5)
+model_ep = EMLeNet(in_channels=1, out_channels=3, dimension=2, task='classification', extra_params_dim=5)
 x = torch.randn(4, 1, 32, 32)
 extra = torch.randn(4, 5)  # [age, sex, TR, TE, clinical_score]
 out = model_ep(x, extra_params=extra)
 print(f"  ✅ Classification + extra_params: {out.shape}")
 
-model_ep_reg = EMUNet(in_channels=1, out_channels=1, dimension=2, task='regression', extra_params_dim=3)
+model_ep_reg = EMLeNet(in_channels=1, out_channels=1, dimension=2, task='regression', extra_params_dim=3)
 out_reg = model_ep_reg(torch.randn(2, 1, 32, 32), extra_params=torch.randn(2, 3))
 print(f"  ✅ Regression + extra_params: {out_reg.shape}")
 
-model_ep_seg = EMUNet(in_channels=1, out_channels=4, dimension=2, task='segmentation', extra_params_dim=2)
+model_ep_seg = EMUNet(in_channels=1, out_channels=4, dimension=2, extra_params_dim=2)  # EMUNet for segmentation
 out_seg = model_ep_seg(torch.randn(2, 1, 32, 32), extra_params=torch.randn(2, 2))
 print(f"  ✅ Segmentation + extra_params: {out_seg.shape}")
 
-# TEST 6: Radiomics (FOS + GLCM)
+# TEST 6: Radiomics (FOS + GLCM) - Use EMLeNet for classification
 print("\n6. RADIOMICS FEATURES (First Order Stats + GLCM)")
 print("-"*70)
-model_no_rad = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_radiomics=False)
-model_rad = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_radiomics=True)
+model_no_rad = EMLeNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_radiomics=False)
+model_rad = EMLeNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_radiomics=True)
 params_no_rad = sum(p.numel() for p in model_no_rad.parameters())
 params_rad = sum(p.numel() for p in model_rad.parameters())
 print(f"  ✅ Without radiomics: {params_no_rad:,} params")
@@ -91,11 +91,11 @@ with torch.no_grad():
 output_diff = (out_no_rad - out_rad).abs().max().item()
 print(f"  ✅ Output difference: {output_diff:.6f} (radiomics impacts predictions)")
 
-# TEST 7: Attention (CBAM)
+# TEST 7: Attention (CBAM) - Use EMUNet for segmentation (attention supported)
 print("\n7. ATTENTION MECHANISMS (CBAM)")
 print("-"*70)
-model_no_att = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_attention=False)
-model_att = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', use_attention=True)
+model_no_att = EMUNet(in_channels=1, out_channels=3, dimension=2, use_attention=False)  # Segmentation
+model_att = EMUNet(in_channels=1, out_channels=3, dimension=2, use_attention=True)  # Segmentation
 params_no_att = sum(p.numel() for p in model_no_att.parameters())
 params_att = sum(p.numel() for p in model_att.parameters())
 print(f"  ✅ Without attention: {params_no_att:,} params")
@@ -107,21 +107,24 @@ with torch.no_grad():
 att_diff = (out_no_att - out_att).abs().max().item()
 print(f"  ✅ Output difference: {att_diff:.6f} (attention active)")
 
-# TEST 8: Save/Load
+# TEST 8: Save/Load - Use EMLeNet for classification
 print("\n8. SAVE/LOAD FUNCTIONALITY")
 print("-"*70)
 import tempfile, os
-model = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification')
+model = EMLeNet(in_channels=1, out_channels=3, dimension=2, task='classification')
 x = torch.randn(2, 1, 32, 32)
+model.eval()
 with torch.no_grad():
     out_orig = model(x)
 
 with tempfile.NamedTemporaryFile(suffix='.pth', delete=False) as f:
     path = f.name
 
-save_model(model, path)
-model_loaded = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification')
-load_model(model_loaded, path)
+# Use native torch save/load for state_dict
+torch.save(model.state_dict(), path)
+model_loaded = EMLeNet(in_channels=1, out_channels=3, dimension=2, task='classification')
+model_loaded.load_state_dict(torch.load(path, weights_only=True))
+model_loaded.eval()
 
 with torch.no_grad():
     out_loaded = model_loaded(x)
@@ -133,10 +136,10 @@ if diff < 1e-6:
 else:
     print(f"  ❌ Save/load mismatch (diff: {diff:.2e})")
 
-# TEST 9: Input Validation
+# TEST 9: Input Validation - EMUNet for segmentation
 print("\n9. INPUT VALIDATION")
 print("-"*70)
-model = EMUNet(in_channels=1, out_channels=3, dimension=2, task='classification', extra_params_dim=5)
+model = EMUNet(in_channels=1, out_channels=3, dimension=2, extra_params_dim=5)  # Segmentation
 
 # Wrong dimensions
 try:

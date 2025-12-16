@@ -56,9 +56,31 @@ from treno import (
 
 # Utilities
 from treno.utils import (
+    # Explainability
     GradCAM,
     compute_saliency_map,
     postprocess_cam,
+    # Metrics
+    compute_metrics,
+    compute_binary_metrics,
+    compute_multilabel_sensitivity_specificity,
+    # Data splitting (medical imaging aware)
+    stratified_group_split,
+    extract_patient_groups,
+    # Feature selection
+    feature_selection,
+    filterFeaturesByCorrelation,
+    # Visualization
+    visualize_embeddings,
+    write_confusion_matrix_to_tensorboard,
+)
+
+# Custom Loss Functions (Segmentation)
+from treno.losses import (
+    EMLabelMapLoss,       # Metric-based segmentation loss
+    dice_loss3D,          # Dice loss for 3D
+    jacard_loss3D,        # Jaccard/IoU loss for 3D
+    EMMulticlassLoss,     # Combined CE + Dice + Jaccard
 )
 
 # Building blocks (advanced)
@@ -100,8 +122,8 @@ dimension = 3  # Input shape: [B, C, D, H, W]
 
 | Model | Classification | Regression | Segmentation | Map-to-Map |
 |-------|---------------|------------|--------------|------------|
-| `EMUNet` | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ❌ |
-| `EMUNetPP` | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ✅ 1D/2D/3D | ❌ |
+| `EMUNet` | ❌ | ❌ | ✅ 1D/2D/3D | ❌ |
+| `EMUNetPP` | ❌ | ❌ | ✅ 1D/2D/3D | ❌ |
 | `EMUNet1D` | ✅ 1D only | ✅ 1D only | ✅ 1D only | ❌ |
 | `UNet1DOptimized` | ✅ 1D only | ✅ 1D only | ❌ | ✅ 1D only |
 | `EMUNetMapToMap` | ❌ | ❌ | ❌ | ✅ 1D/2D/3D |
@@ -111,20 +133,43 @@ dimension = 3  # Input shape: [B, C, D, H, W]
 
 ---
 
+## Deep Radiomics (Feature Extraction)
+
+After training any model, extract pooled deep features and optionally concatenate engineered radiomics via a single helper:
+
+```python
+from treno import get_deep_radiomics_features, EMUNet
+import torch
+
+model = EMUNet(1, 4, 3, use_radiomics=True).eval()
+x = torch.randn(2, 1, 64, 64, 64)
+
+# Returns [B, F] matrix: deep pooled features (+ engineered radiomics if enabled)
+features = get_deep_radiomics_features(model, x, pool='avg', include_engineered=True)
+```
+
+Notes:
+- Works across all models (U-Net/UNet++, MapToMap, LeNet, ResNet) and in 1D/2D/3D.
+- `pool='avg'|'max'` controls spatial pooling of deep features.
+- Set `include_engineered=False` to return only deep features.
+
+---
+
 ## Model Architecture Guide
 
 ### Standard U-Net: `EMUNet`
 
-**Best for**: Fast baseline, general purpose, all tasks
+**Best for**: Semantic segmentation (pixel/voxel-level labeling)
+
+> **Note**: EMUNet is segmentation-only. For classification/regression, use `EMLeNet` or `EMResNet`.
 
 ```python
 from treno import EMUNet
 
 model = EMUNet(
     in_channels=1,              # Input channels (1 for grayscale, 3 for RGB)
-    out_channels=10,            # Number of outputs (classes, values, etc.)
+    out_channels=4,             # Number of segmentation classes
     dimension=3,                # 1, 2, or 3
-    task='classification',      # 'classification', 'regression', 'segmentation'
     
     # Optional features
     use_attention=True,         # Add CBAM attention blocks
@@ -132,35 +177,34 @@ model = EMUNet(
     extra_params_dim=0,         # Extra metadata dimension (age, sex, etc.)
     
     # Architecture config
-    num_filters=[64, 128, 256, 512],  # Filter counts per level
-    depth=4,                    # U-Net depth (number of downsampling steps)
-    dropout=0.0,                # Dropout rate
+    num_filters=[64, 128, 256],  # Filter counts per level
+    dropout_rate=0.0,           # Dropout rate
+    use_skip_attention=False,   # Attention gates on skip connections
     
     # Radiomics config (if use_radiomics=True)
-    radiomics_radii=[1],        # GLCM radii (multi-scale)
-    num_bins=64,                # Histogram bins for texture
+    radii=[1],                  # GLCM radii (multi-scale)
+    num_bins=256,               # Histogram bins for texture
 )
 ```
 
-**Output shapes**:
-- Classification: `[B, out_channels]` (probabilities via sigmoid)
-- Regression: `[B, out_channels]` (raw values)
-- Segmentation: `[B, out_channels, D, H, W]` (logits)
+**Output shape**: `[B, out_channels, D, H, W]` - raw logits (use with `CrossEntropyLoss`)
 
 ### U-Net++: `EMUNetPP`
 
-**Best for**: Better accuracy, more parameters, same API as `EMUNet`
+**Best for**: High-quality segmentation with dense skip connections
+
+> **Note**: EMUNetPP is segmentation-only. For classification/regression, use `EMLeNet` or `EMResNet`.
 
 ```python
 from treno import EMUNetPP
 
 model = EMUNetPP(
-    # Same parameters as EMUNet
     in_channels=1,
-    out_channels=5,
+    out_channels=5,             # Number of segmentation classes
     dimension=3,
-    task='segmentation',
     use_attention=True,
+    use_radiomics=True,
+    extra_params_dim=3,
 )
 ```
 
@@ -433,7 +477,7 @@ dataset = TrenoDataset(
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from treno import EMUNet, create_treno_dataset_from_csv
+from treno import EMLeNet, create_treno_dataset_from_csv
 
 # 1. Data
 train_dataset = create_treno_dataset_from_csv(
@@ -452,8 +496,8 @@ val_dataset = create_treno_dataset_from_csv(
 train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
 val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
 
-# 2. Model
-model = EMUNet(
+# 2. Model (use EMLeNet for classification, NOT EMUNet)
+model = EMLeNet(
     in_channels=1,
     out_channels=5,  # 5 classes
     dimension=3,
@@ -656,7 +700,7 @@ criterion = nn.MSELoss()
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from treno import EMUNet, create_treno_dataset_from_csv
+from treno import EMLeNet, create_treno_dataset_from_csv
 
 # Data
 train_dataset = create_treno_dataset_from_csv(
@@ -667,8 +711,8 @@ train_dataset = create_treno_dataset_from_csv(
 )
 train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=4)
 
-# Model
-model = EMUNet(
+# Model (use EMLeNet for classification)
+model = EMLeNet(
     in_channels=1,
     out_channels=5,
     dimension=3,
@@ -676,7 +720,6 @@ model = EMUNet(
     use_attention=True,
     use_radiomics=True,
     num_filters=[32, 64, 128, 256],
-    depth=4,
 ).cuda()
 
 # Training
@@ -701,10 +744,10 @@ for epoch in range(50):
 **Goal**: Predict multiple pathologies from chest X-rays
 
 ```python
-from treno import EMUNet
+from treno import EMLeNet
 
-# Model for multi-label (each class independent)
-model = EMUNet(
+# Model for multi-label (each class independent, use EMLeNet for classification)
+model = EMLeNet(
     in_channels=1,
     out_channels=14,  # 14 pathologies
     dimension=2,
@@ -736,10 +779,9 @@ from treno import EMUNetPP
 
 model = EMUNetPP(
     in_channels=4,  # T1, T1ce, T2, FLAIR
-    out_channels=4,  # 4 classes
+    out_channels=4,  # 4 segmentation classes
     dimension=3,
-    task='segmentation',
-    use_attention=True,
+    use_attention=True,  # EMUNetPP is segmentation-only, no task param needed
 ).cuda()
 
 criterion = nn.CrossEntropyLoss()
@@ -1089,17 +1131,17 @@ reconstructed = model(x)                       # [B, out_channels, D, H, W]
 START: What is your task?
 
 ├─ Classification
-│  ├─ 3D Medical Images → EMUNet or EMUNetPP (dimension=3, task='classification')
-│  ├─ 2D Images → EMUNet or EMUNetPP (dimension=2, task='classification')
-│  └─ 1D Signals → EMUNet1D (task='classification')
+│  ├─ 3D Medical Images → EMLeNet or EMResNet (dimension=3, task='classification')
+│  ├─ 2D Images → EMLeNet or EMResNet (dimension=2, task='classification')
+│  └─ 1D Signals → EMUNet1D (task='classification') or EMLeNet (dimension=1)
 │
 ├─ Regression
-│  ├─ 3D/2D → EMUNet or EMUNetPP (task='regression')
-│  └─ 1D → EMUNet1D (task='regression')
+│  ├─ 3D/2D → EMLeNet or EMResNet (task='regression')
+│  └─ 1D → EMUNet1D (task='regression') or EMLeNet (dimension=1)
 │
 ├─ Segmentation
-│  ├─ Need best quality → EMUNetPP (task='segmentation')
-│  └─ Fast baseline → EMUNet (task='segmentation')
+│  ├─ Need best quality → EMUNetPP (segmentation-only)
+│  └─ Fast baseline → EMUNet (segmentation-only)
 │
 └─ Map-to-Map (Image Translation)
    ├─ Need best quality → EMUNetPPMapToMap
@@ -1110,3 +1152,286 @@ START: What is your task?
 ---
 
 **Ready to build? Start with the Quick Start examples and adapt to your specific use case!**
+
+---
+
+## Explainability (Grad-CAM & Saliency Maps)
+
+### Quick Start
+
+```python
+from treno import GradCAM, compute_saliency_map, postprocess_cam
+import torch
+
+# Load your model
+model = YourModel()
+model.eval()
+
+# Prepare input
+input_tensor = torch.randn(1, 1, 64, 64, 64).requires_grad_(True)
+
+# 1. GRAD-CAM
+gradcam = GradCAM(model, target_layer=model.encoder[-1])
+cam = gradcam(input_tensor, target_class=1)
+cam_upsampled = gradcam.upsample_cam(cam, input_tensor.shape[-3:])
+
+# 2. SALIENCY MAP
+saliency = compute_saliency_map(model, input_tensor, target_class=1)
+
+# 3. POST-PROCESS (smooth, normalize, mask)
+cam_final = postprocess_cam(cam_upsampled, mask=brain_mask, smooth=True)
+saliency_final = postprocess_cam(saliency, mask=brain_mask, smooth=True)
+```
+
+### Choosing the Right Target Layer
+
+```python
+# For U-Net style models (EMUNet)
+gradcam = GradCAM(model, target_layer=model.encoder[-1])  # Last encoder layer
+
+# For LeNet style models (EMLeNet)
+gradcam = GradCAM(model, target_layer=model.features[-2])  # Before pooling
+
+# General rule: Last convolutional layer before global pooling
+```
+
+### Best Practices
+
+1. **Post-Processing Order**: smooth → normalize → mask
+2. **If Grad-CAM is all zeros**: Check gradient flow, verify target layer
+3. **Noisy saliency maps**: Apply more smoothing with `smooth_size=5` or `7`
+4. **GPU acceleration**: Keep tensors on device, everything is GPU-compatible
+
+---
+
+## Migration from Legacy Loaders
+
+### Old Way (Legacy)
+
+```python
+from treno.loaders import ImageLabelmapDataset
+
+all_transforms = {'resize': [320, 320, 120], 'normalizex': 'max'}
+
+dataset = ImageLabelmapDataset(
+    annotations_file='train.csv',
+    transform=all_transforms,
+    index=[0, 1, 2]
+)
+```
+
+### New Way (Modern)
+
+```python
+from treno.loaders import create_treno_dataset_from_csv
+from torch.utils.data import DataLoader
+
+dataset = create_treno_dataset_from_csv(
+    csv_file='train.csv',
+    target_size=[64, 64, 64],
+    target_spacing=2.0,
+    augmentation=True,
+    cache_dir='./cache'
+)
+
+loader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=4)
+```
+
+### Transform Migration
+
+| Old Transform Dict | New pyable Transform |
+|-------------------|----------------------|
+| `'resize': [H, W, D]` | `target_size=[H, W, D]` in dataset |
+| `'normalizex': 'max'` | `IntensityNormalization(method='max')` |
+| `'normalizex': 'z'` | `IntensityNormalization(method='z-score')` |
+| N/A | `RandomFlip(axes=[1, 2], prob=0.5)` |
+| N/A | `RandomRotation90(axes=(1, 2), prob=0.3)` |
+
+### Benefits of Migration
+
+✅ **Proper pyable v3 integration** - Correct ZYX array conventions  
+✅ **Automatic label preservation** - No interpolated label values  
+✅ **Better performance** - Smart caching system  
+✅ **More flexible** - Supports JSON, CSV, multi-CSV formats  
+✅ **Modular transforms** - Composable augmentation pipeline
+
+---
+
+## Custom Loss Functions (treno.losses)
+
+Treno provides specialized loss functions for medical imaging segmentation beyond standard PyTorch losses.
+
+### Import
+
+```python
+from treno.losses import (
+    EMLabelMapLoss,       # Flexible metric-based segmentation loss
+    dice_loss3D,          # Dice loss for 3D volumes
+    jacard_loss3D,        # Jaccard/IoU loss for 3D volumes
+    EMCrossEntropyLoss,   # CrossEntropy with auto squeeze
+    EMMulticlassLoss,     # Combined CE + Dice + Jaccard loss
+)
+```
+
+### EMLabelMapLoss
+
+**Best for**: Custom metric-based optimization for segmentation
+
+```python
+from treno.losses import EMLabelMapLoss
+
+loss_fn = EMLabelMapLoss(
+    num_classes=4,           # Number of segmentation classes
+    logit=True,              # Input is raw logits (will argmax)
+    dice=True,               # Include Dice coefficient
+    jacard=True,             # Include Jaccard/IoU
+    overall_accuracy=False,  # Include pixel accuracy
+    label_accuracy=False,    # Include per-class accuracy
+    avoid_classes=[0],       # Ignore background class (optional)
+    average_loss=True        # Average all metrics
+)
+
+# Forward pass
+pred = model(images)    # [B, C, D, H, W] logits
+loss = loss_fn(pred, masks)  # Computes 1 - avg(metrics)
+```
+
+### Dice & Jaccard Loss (3D)
+
+```python
+from treno.losses import dice_loss3D, jacard_loss3D
+
+dice_loss = dice_loss3D()
+jaccard_loss = jacard_loss3D()
+
+# Forward
+pred = model(images)         # [B, C, D, H, W] logits
+loss_d = dice_loss(pred, masks)
+loss_j = jaccard_loss(pred, masks)
+```
+
+### EMMulticlassLoss
+
+**Best for**: Combining multiple losses for robust segmentation training
+
+```python
+from treno.losses import EMMulticlassLoss
+import torch
+
+# Combines CrossEntropy + Dice + Jaccard (averaged)
+loss_fn = EMMulticlassLoss(
+    weight=torch.tensor([0.1, 1.0, 2.0, 3.0]),  # Class weights
+    dimension=3                                   # 3D volumes
+)
+
+loss = loss_fn(pred, masks)  # Returns (CE + Dice + Jaccard) / 3
+```
+
+---
+
+## Utility Functions (treno.utils)
+
+### Feature Selection Pipeline
+
+```python
+from treno.utils import feature_selection
+
+# Complete feature selection workflow
+selected_features, scores = feature_selection(
+    features,              # DataFrame of features
+    labels,                # Target labels
+    n_features=20,         # Number of features to select
+    method='gini',         # 'gini', 'mutual_info', 'f_classif'
+    correlation_threshold=0.9,  # Remove correlated features
+    mad_filter=True        # Filter low variance features
+)
+```
+
+### Medical-Aware Data Splitting
+
+**Critical for medical imaging**: Prevents patient leakage between train/test sets.
+
+```python
+from treno.utils import stratified_group_split, extract_patient_groups
+
+# Automatic patient group extraction (handles augmentation suffixes)
+groups = extract_patient_groups(df.index, augmentation_suffix='-aug')
+
+# Split ensuring no patient appears in both train and test
+X_train, X_test, y_train, y_test, g_train, g_test = stratified_group_split(
+    X, y,
+    groups=None,              # Auto-extracted from index
+    test_size=0.25,
+    random_state=42,
+    augmentation_suffix='-aug'
+)
+```
+
+### Embedding Visualization
+
+```python
+from treno.utils import visualize_embeddings
+
+# Extract features from trained model
+features, labels = [], []
+model.eval()
+with torch.no_grad():
+    for batch in dataloader:
+        feat, _ = model.extract_features(batch['images'])
+        features.append(feat.flatten(1).cpu().numpy())
+        labels.append(batch['label'].numpy())
+
+# Visualize with t-SNE or PCA
+visualize_embeddings(features, labels, method='tsne', save_path='embeddings.png')
+```
+
+### Metrics and Evaluation
+
+```python
+from treno.utils import (
+    compute_metrics,
+    compute_binary_metrics,
+    compute_multilabel_sensitivity_specificity,
+    write_confusion_matrix_to_tensorboard
+)
+
+# Comprehensive metrics
+metrics = compute_metrics(y_true, y_pred, multilabel=False)
+print(f"Accuracy: {metrics['accuracy']:.3f}")
+print(f"F1: {metrics['f1']:.3f}")
+print(f"Confusion Matrix:\n{metrics['confusion_matrix']}")
+
+# Binary classification metrics
+binary_metrics = compute_binary_metrics(y_true, y_pred)
+# Returns: accuracy, precision, recall, f1, specificity, sensitivity
+
+# Per-class sensitivity/specificity from confusion matrix
+sens, spec = compute_multilabel_sensitivity_specificity(confusion_matrix)
+
+# TensorBoard logging
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter('runs/experiment')
+write_confusion_matrix_to_tensorboard(writer, cm, min_val=0, max_val=100, tag="val/cm", epoch=10)
+```
+
+### Other Utilities
+
+```python
+from treno.utils import (
+    resize_image,         # Resize ND arrays with interpolation
+    store_3d_array,       # Save 3D arrays to NIfTI format
+    remove_nans,          # Clean NaN values from features/labels
+    zScoreFeatures,       # Z-score normalization for features
+    filterFeaturesByMAD,  # Filter by Median Absolute Deviation
+    filterFeaturesByCorrelation,  # Remove highly correlated features
+)
+
+# Resize image
+resized = resize_image(arr, target_size=[128, 128, 128])
+
+# Z-score features
+normalized = zScoreFeatures(feature_dataframe)
+
+# Remove correlated features (keep one from each correlated pair)
+filtered = filterFeaturesByCorrelation(features, threshold=0.9)
+```

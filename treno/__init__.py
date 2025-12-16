@@ -48,6 +48,7 @@ from .models import (
     # Radiomics and feature computation
     calculate_fos_features,
     calculate_simple_glcm_features,
+    get_deep_radiomics_features,
     # Training utilities
     EarlyStopping,
     ModelCheckpoint,
@@ -122,6 +123,7 @@ __all__ = [
     # Features
     "calculate_fos_features",
     "calculate_simple_glcm_features",
+    "get_deep_radiomics_features",
     # Training Utilities
     "EarlyStopping",
     "ModelCheckpoint",

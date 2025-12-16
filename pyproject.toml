@@ -6,7 +6,7 @@ allow-direct-references = true
 
 [project]
 name = "treno"
-version = "3.5.0.0"
+version = "3.5.0.1"
 authors = [
   { name="Dr. Eros Montin, PhD", email="eros.montin@gmail.com" },
 ]
@@ -22,10 +22,10 @@ dependencies = [
     "scikit-learn",
     "torchvision",
     "tensorboard",
-    "pynico",
-    "pyable",
-    "pyable-dataloader",
-    "pyable-ml[torch,plotting]",
+    "pynico @ git+https://github.com/erosmontin/pynico.git@v3",
+    "pyable @ git+https://github.com/erosmontin/pyable.git@v3",
+    "pyable-dataloader @ git+https://github.com/erosmontin/pyable-dataloader.git@v3",
+    "pyml[torch,plotting] @ git+https://github.com/erosmontin/pyml.git",
     "imbalanced-learn"
 ]
 

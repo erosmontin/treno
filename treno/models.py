@@ -329,10 +329,14 @@ class UNetPPBase(nn.Module):
         return self.forward_features(x)
 
 class EMUNetPP(nn.Module):
-    """UNet++ wrapper with NetworkHead for segmentation/classification/regression."""
+    """UNet++ for semantic segmentation with dense skip connections.
+    
+    This model is specifically designed for pixel/voxel-level segmentation tasks.
+    For classification or regression, use EMLeNet or EMResNet instead.
+    """
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64,128,256],
-                 task='segmentation', use_batchnorm=True, activation='leaky_relu',
-                 dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024,512],
+                 use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False,
                  extra_params_dim=0, use_attention=True, use_radiomics=False,
                  num_bins=256, radii=[1]):
         super().__init__()
@@ -340,7 +344,7 @@ class EMUNetPP(nn.Module):
             raise ValueError("Channels must be positive")
         self.dimension = dimension
         self.in_channels = in_channels
-        self.task = task
+        self.task = 'segmentation'  # Fixed task
         self.use_radiomics = use_radiomics
         self.num_bins = num_bins
         self.radii = radii
@@ -348,13 +352,18 @@ class EMUNetPP(nn.Module):
         
         self.base = UNetPPBase(in_channels, num_filters, dimension, 3, use_batchnorm,
                                activation, dropout_rate, leaky_slope, bias, use_attention)
-        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # Radiomics: 24 FOS + (3 features × directions × radii)
         # directions: 1D=1, 2D=2, 3D=3
         num_directions = dimension
-        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         # Use first level filters for head input similar to EMUNet
-        self.head = NetworkHead(num_filters[0], out_channels, dimension, task, fc_layers,
+        self.head = NetworkHead(num_filters[0], out_channels, dimension, 'segmentation', [],
                                 dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim)
+        
+        # Optional fusion: gate UNet++ output feature maps with extra_params
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(num_filters[0], extra_params_dim)
     
     def _compute_radiomics(self, x):
         stats_features = []
@@ -382,7 +391,21 @@ class EMUNetPP(nn.Module):
         if extra_params is not None and self.extra_params_dim > 0:
             if extra_params.shape[1] != self.extra_params_dim:
                 raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
+        # Apply fusion gating to UNet++ output feature maps if requested
+        if extra_params is not None and self.use_fusion:
+            x = self.fusion(x, extra_params)
         return self.head(x, radiomics_features, extra_params)
+
+    def extract_features(self, x):
+        """Extract deep features prior to the head along with engineered radiomics.
+
+        Returns a tuple (features, radiomics_features) where:
+        - features: tensor [B, C, ...] from UNet++ output prior to NetworkHead
+        - radiomics_features: tensor [B, R] or None
+        """
+        features = self.base.forward_features(x)
+        radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
+        return features, radiomics_features
 
 class LeNetBase(nn.Module):
     """Base LeNet architecture with flexible configuration."""
@@ -579,7 +602,6 @@ class EMUNetMapToMap(nn.Module):
         out_channels: Number of output channels (typically == in_channels for translation)
         dimension: Spatial dimension (1, 2, or 3)
         num_filters: List of filter counts per level
-        task: 'map-to-map' (fixed for this model)
         activation_final: Final activation ('sigmoid', 'tanh', 'none')
         use_batchnorm: Whether to use batch normalization
         activation: Hidden layer activation
@@ -600,9 +622,10 @@ class EMUNetMapToMap(nn.Module):
         >>> output = model(x)  # [2, 1, 256, 256]
     """
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256, 512],
-                 task='map-to-map', activation_final='none', use_batchnorm=True,
+                 activation_final='none', use_batchnorm=True,
                  activation='leaky_relu', dropout_rate=0.0, leaky_slope=0.1, bias=False,
-                 use_attention=True, use_skip_attention=False, extra_params_dim=0):
+                 use_attention=True, use_skip_attention=False, extra_params_dim=0,
+                 use_radiomics=False, num_bins=256, radii=[1]):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -614,14 +637,26 @@ class EMUNetMapToMap(nn.Module):
         self.task = 'map-to-map'
         self.use_skip_attention = use_skip_attention
         self.extra_params_dim = extra_params_dim
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
         
         # Use UNetBase as encoder-decoder backbone
         self.base = UNetBase(in_channels, num_filters, dimension, 3, use_batchnorm,
                             activation, dropout_rate, leaky_slope, bias, False, use_attention)
         
-        # Map-to-map head
-        self.head = MapToMapHead(num_filters[0], out_channels, dimension, dropout_rate,
+        # Radiomics: 24 FOS + (3 features × directions × radii)
+        num_directions = dimension
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        
+        # Map-to-map head with radiomics support
+        self.head = MapToMapHead(num_filters[0] + radiomics_dim, out_channels, dimension, dropout_rate,
                                 activation_final, bias, extra_params_dim)
+        
+        # Optional fusion: gate feature maps with extra_params for conditioned generation
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(num_filters[0], extra_params_dim)
     
     def forward(self, x, extra_params=None):
         """
@@ -642,12 +677,46 @@ class EMUNetMapToMap(nn.Module):
             if extra_params.shape[1] != self.extra_params_dim:
                 raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
         
-        x = self.base(x)
-        return self.head(x, extra_params)
+        # Compute radiomics if enabled
+        radiomics_features = None
+        if self.use_radiomics:
+            radiomics_features = self._compute_radiomics(x)
+        
+        # Process through base network
+        features = self.base(x)
+        
+        # Concatenate radiomics features if available
+        if radiomics_features is not None:
+            # Broadcast radiomics to spatial dimensions
+            radiomics_features = radiomics_features.view(features.shape[0], -1, *[1]*self.dimension)
+            radiomics_features = radiomics_features.repeat(1, 1, *features.shape[2:])
+            features = torch.cat([features, radiomics_features], dim=1)
+        
+        return self.head(features, extra_params)
+    
+    def _compute_radiomics(self, x):
+        """
+        Compute radiomics features (FOS + GLCM) for each channel.
+        Features are standardized per sample for stability.
+        """
+        stats_features = []
+        for i in range(x.shape[0]):
+            channelfeatures = []
+            for j in range(self.in_channels):
+                fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                combined = torch.cat((fos, glcm))
+                # Standardize features for better numerical stability
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
+                channelfeatures.append(combined)
+            stats_features.append(torch.cat(channelfeatures))
+        return torch.stack(stats_features)
     
     def extract_features(self, x):
         """Extract features from bottleneck for visualization/analysis."""
-        return self.base.forward_features(x), None
+        bottleneck_features, skip_connections = self.base.forward_features(x)
+        radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
+        return bottleneck_features, radiomics_features
 
 class EMUNetPPMapToMap(nn.Module):
     """
@@ -681,7 +750,7 @@ class EMUNetPPMapToMap(nn.Module):
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256],
                  activation_final='none', use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True,
-                 extra_params_dim=0):
+                 extra_params_dim=0, use_radiomics=False, num_bins=256, radii=[1]):
         super().__init__()
         
         if in_channels <= 0 or out_channels <= 0:
@@ -692,14 +761,44 @@ class EMUNetPPMapToMap(nn.Module):
         self.out_channels = out_channels
         self.task = 'map-to-map'
         self.extra_params_dim = extra_params_dim
+        self.use_radiomics = use_radiomics
+        self.num_bins = num_bins
+        self.radii = radii
         
         # Use UNetPPBase as encoder-decoder backbone
         self.base = UNetPPBase(in_channels, num_filters, dimension, 3, use_batchnorm,
                               activation, dropout_rate, leaky_slope, bias, use_attention)
         
-        # Map-to-map head
-        self.head = MapToMapHead(num_filters[0], out_channels, dimension, dropout_rate,
+        # Radiomics: 24 FOS + (3 features × directions × radii)
+        num_directions = dimension
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        
+        # Map-to-map head with radiomics support
+        self.head = MapToMapHead(num_filters[0] + radiomics_dim, out_channels, dimension, dropout_rate,
                                 activation_final, bias, extra_params_dim)
+        
+        # Optional fusion: gate feature maps with extra_params for conditioned generation
+        self.use_fusion = extra_params_dim > 0
+        if self.use_fusion:
+            self.fusion = FusionHead(num_filters[0], extra_params_dim)
+    
+    def _compute_radiomics(self, x):
+        """
+        Compute radiomics features (FOS + GLCM) for each channel.
+        Features are standardized per sample for stability.
+        """
+        stats_features = []
+        for i in range(x.shape[0]):
+            channelfeatures = []
+            for j in range(self.in_channels):
+                fos = calculate_fos_features(x[i, j], num_bins=self.num_bins)
+                glcm = calculate_simple_glcm_features(x[i, j], radii=self.radii, dimension=self.dimension)
+                combined = torch.cat((fos, glcm))
+                # Standardize features for better numerical stability
+                combined = (combined - combined.mean()) / (combined.std() + 1e-6)
+                channelfeatures.append(combined)
+            stats_features.append(torch.cat(channelfeatures))
+        return torch.stack(stats_features)
     
     def forward(self, x, extra_params=None):
         """
@@ -720,12 +819,32 @@ class EMUNetPPMapToMap(nn.Module):
             if extra_params.shape[1] != self.extra_params_dim:
                 raise ValueError(f"Provided extra_params dim ({extra_params.shape[1]}) does not match initialized extra_params_dim ({self.extra_params_dim})")
         
-        x = self.base(x)
-        return self.head(x, extra_params)
+        # Compute radiomics if enabled
+        radiomics_features = None
+        if self.use_radiomics:
+            radiomics_features = self._compute_radiomics(x)
+        
+        # Process through base network
+        features = self.base(x)
+        
+        # Apply fusion gating if extra_params provided (for conditioned generation)
+        if extra_params is not None and self.use_fusion:
+            features = self.fusion(features, extra_params)
+        
+        # Concatenate radiomics features if available
+        if radiomics_features is not None:
+            # Broadcast radiomics to spatial dimensions
+            radiomics_features = radiomics_features.view(features.shape[0], -1, *[1]*self.dimension)
+            radiomics_features = radiomics_features.repeat(1, 1, *features.shape[2:])
+            features = torch.cat([features, radiomics_features], dim=1)
+        
+        return self.head(features, extra_params)
     
     def extract_features(self, x):
         """Extract features from bottleneck for visualization/analysis."""
-        return self.base.forward_features(x), None
+        bottleneck_features = self.base.forward_features(x)
+        radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
+        return bottleneck_features, radiomics_features
 
 class SkipConnectionAligner(nn.Module):
     """
@@ -785,8 +904,12 @@ class SkipConnectionAligner(nn.Module):
             return decoder_feat[tuple(slices)]
 
 
+class EMUNet(nn.Module):
     """
-    Enhanced Multi-task U-Net architecture with optional radiomics and extra parameters.
+    Enhanced U-Net for semantic segmentation with optional radiomics and extra parameters.
+    
+    This model is specifically designed for pixel/voxel-level segmentation tasks.
+    For classification or regression, use EMLeNet or EMResNet instead.
     
     Compatible with pyable-dataloader TrenoDataset output format.
     
@@ -797,12 +920,11 @@ class SkipConnectionAligner(nn.Module):
         >>> # Create dataset
         >>> dataset = TrenoDataset(manifest='data.json', target_size=[64, 64, 64])
         >>> 
-        >>> # Create model
+        >>> # Create model for segmentation
         >>> model = EMUNet(
         ...     in_channels=1,
         ...     out_channels=4,
         ...     dimension=3,
-        ...     task='segmentation',
         ...     use_radiomics=True,
         ...     extra_params_dim=3  # e.g., age, TR, TE
         ... )
@@ -812,10 +934,10 @@ class SkipConnectionAligner(nn.Module):
         >>> output = model(batch['images'], extra_params=batch.get('aux_data'))
     """
     def __init__(self, in_channels, out_channels, dimension=2, num_filters=[64, 128, 256],
-                 task='regression', use_batchnorm=True, activation='leaky_relu',
-                 dropout_rate=0.0, leaky_slope=0.1, bias=False, fc_layers=[1024, 512],
+                 use_batchnorm=True, activation='leaky_relu',
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False,
                  extra_params_dim=0, use_residual=False, use_attention=True,
-                 use_radiomics=False, num_bins=256, radii=[1],reduction=2,
+                 use_radiomics=False, num_bins=256, radii=[1], reduction=2,
                  use_skip_attention=False):
         super().__init__()
         
@@ -830,20 +952,20 @@ class SkipConnectionAligner(nn.Module):
         self.radii = radii
         self.extra_params_dim = extra_params_dim
         self.in_channels = in_channels
-        self.task = task
+        self.task = 'segmentation'  # Fixed task
         self.base = UNetBase(
             in_channels, num_filters, dimension, 3, use_batchnorm,
             activation, dropout_rate, leaky_slope, bias, use_residual, use_attention, reduction,
             use_skip_attention
         )
         
-        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # Radiomics: 24 FOS + (3 features × directions × radii)
         # directions: 1D=1, 2D=2, 3D=3
         num_directions = dimension
-        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         
         self.head = NetworkHead(
-            num_filters[0], out_channels, dimension, task, fc_layers,
+            num_filters[0], out_channels, dimension, 'segmentation', [],
             dropout_rate, activation, leaky_slope, bias, radiomics_dim, extra_params_dim
         )
         # Optional fusion: gate UNet output feature maps with extra_params
@@ -950,9 +1072,9 @@ class EMLeNet(nn.Module):
             activation, dropout_rate, leaky_slope, bias, use_residual, use_attention,reduction
         )
         
-        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # Radiomics: 24 FOS + (3 features × directions × radii)
         num_directions = dimension
-        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         
         self.head = NetworkHead(
             num_filters[-2], out_channels, dimension, task, fc_layers,
@@ -1446,9 +1568,9 @@ class EMResNet(nn.Module):
         
         self.encoder = ResNetEncoder(in_channels, dimension, layers, base_width,
                                      use_batchnorm, activation, bias)
-        # Radiomics: 21 FOS + (3 features × directions × radii)
+        # Radiomics: 24 FOS + (3 features × directions × radii)
         num_directions = dimension
-        radiomics_dim = (21 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
+        radiomics_dim = (24 + 3 * num_directions * len(radii)) * in_channels if use_radiomics else 0
         # Encoder output channels = base_width*8
         self.head = NetworkHead(base_width*8, out_channels, dimension, task, fc_layers,
                                 dropout_rate, 'leaky_relu' if activation=='relu' else activation,
@@ -1491,6 +1613,81 @@ class EMResNet(nn.Module):
             x = self.fusion(x, extra_params)
         return self.head(x, radiomics_features, extra_params)
 
+    def extract_features(self, x):
+        """Extract encoder features before global pooling and FC, plus radiomics.
+
+        Returns (features, radiomics_features) where features is [B, C, ...].
+        """
+        features = self.encoder.forward_features(x)
+        radiomics_features = self._compute_radiomics(x) if self.use_radiomics else None
+        return features, radiomics_features
+
+def get_deep_radiomics_features(model, x, extra_params=None, pool='avg', include_engineered=True):
+    """Return a [B, F] vector of deep radiomics features for any model.
+
+    - Uses model.extract_features(x) when available.
+    - Applies adaptive pooling (avg or max) over spatial dimensions to flatten deep features.
+    - Optionally concatenates engineered radiomics if available/enabled.
+
+    Args:
+        model: Treno model instance
+        x: input tensor [B, C, ...]
+        extra_params: optional extra params [B, E] (unused here; present for future gating compatibility)
+        pool: 'avg' or 'max'
+        include_engineered: whether to append engineered radiomics features if present
+
+    Returns:
+        Tensor of shape [B, F]
+    """
+    # Get deep features and engineered radiomics
+    deep = None
+    engineered = None
+
+    if hasattr(model, 'extract_features') and callable(getattr(model, 'extract_features')):
+        feats = model.extract_features(x)
+        # Handle different tuple arities across models
+        if isinstance(feats, tuple):
+            # EMUNet returns (bottleneck_features, skip_connections, radiomics_features)
+            if len(feats) == 3:
+                deep, _, engineered = feats
+            elif len(feats) == 2:
+                deep, engineered = feats
+            else:
+                deep = feats[0]
+        else:
+            deep = feats
+    else:
+        # Fallback: try common attribute names
+        if hasattr(model, 'base') and hasattr(model.base, 'forward_features'):
+            deep = model.base.forward_features(x)
+        elif hasattr(model, 'encoder') and hasattr(model.encoder, 'forward_features'):
+            deep = model.encoder.forward_features(x)
+        else:
+            raise AttributeError("Model does not expose extractable features. Implement extract_features().")
+
+    # Adaptive pooling to [B, C, 1, ...] then flatten to [B, C]
+    if deep.dim() > 2:
+        spatial_dims = deep.dim() - 2
+        if pool == 'avg':
+            pool_layer = {1: nn.AdaptiveAvgPool1d(1), 2: nn.AdaptiveAvgPool2d(1), 3: nn.AdaptiveAvgPool3d(1)}.get(spatial_dims)
+        else:
+            pool_layer = {1: nn.AdaptiveMaxPool1d(1), 2: nn.AdaptiveMaxPool2d(1), 3: nn.AdaptiveMaxPool3d(1)}.get(spatial_dims)
+        if pool_layer is None:
+            raise ValueError(f"Unsupported spatial dims: {spatial_dims}")
+        deep = pool_layer(deep)
+        deep = torch.flatten(deep, 1)
+
+    # Concatenate engineered radiomics if requested and available
+    if include_engineered and engineered is not None:
+        if engineered.dim() > 2:
+            engineered = torch.flatten(engineered, 1)
+        # Ensure shapes are [B, *]
+        if engineered.shape[0] != deep.shape[0]:
+            raise ValueError("Batch size mismatch between deep and engineered features")
+        deep = torch.cat([deep, engineered], dim=1)
+
+    return deep
+
 
 # ============================================================================
 # MAIN (TESTS)
@@ -1507,7 +1704,6 @@ if __name__ == "__main__":
                 'out_channels': 1,
                 'dimension': 1,
                 'num_filters': [32, 64],
-                'task': 'regression',
                 'extra_params_dim': 3,  # age, TR, TE
                 'use_radiomics': True,
                 'num_bins': 128,
@@ -1570,7 +1766,6 @@ if __name__ == "__main__":
                 'out_channels': 4,
                 'dimension': 3,
                 'num_filters': [32, 64],
-                'task': 'segmentation',
                 'use_residual': True,
                 'use_radiomics': True,
                 'num_bins': 64,
@@ -1586,15 +1781,16 @@ if __name__ == "__main__":
         x = config['input']
         extra = config['extra']
         out = model(x, extra) if extra is not None else model(x)
+        task_str = getattr(model, 'task', 'n/a')
         if isinstance(model, EMUNet):
             features, skip, radiomics = model.extract_features(x)
-            print(f"{config['kwargs']['dimension']}D {config['kwargs']['task']} output shape: {out.shape}")
+            print(f"{config['kwargs']['dimension']}D {task_str} output shape: {out.shape}")
             print(f"{config['kwargs']['dimension']}D Extracted bottleneck features shape: {features.shape}")
             print(f"{config['kwargs']['dimension']}D Skip connections: {[s.shape for s in skip]}")
             print(f"{config['kwargs']['dimension']}D Radiomics features shape: {radiomics.shape if radiomics is not None else 'None'}")
         else:
             features, radiomics = model.extract_features(x)
-            print(f"{config['kwargs']['dimension']}D {config['kwargs']['task']} output shape: {out.shape}")
+            print(f"{config['kwargs']['dimension']}D {task_str} output shape: {out.shape}")
             print(f"{config['kwargs']['dimension']}D Extracted features shape: {features.shape}")
             print(f"{config['kwargs']['dimension']}D Radiomics features shape: {radiomics.shape if radiomics is not None else 'None'}")
         print()
