@@ -97,7 +97,13 @@ def calculate_simple_glcm_features(x, radii=[1], dimension=2):
 
 class ChannelAttention(nn.Module):
     """Channel attention module for CBAM."""
-    def __init__(self, in_channels, dimension=2, reduction=16):
+    def __init__(self, in_channels, dimension=2, reduction=0.25):
+        """
+        Args:
+            in_channels: Number of input channels
+            dimension: Spatial dimension (1, 2, or 3)
+            reduction: Percentage of channels for bottleneck (0 < reduction <= 1)
+        """
         super().__init__()
         self.dimension = dimension
         self.avg_pool = {
@@ -105,9 +111,11 @@ class ChannelAttention(nn.Module):
             2: nn.AdaptiveAvgPool2d(1),
             3: nn.AdaptiveAvgPool3d(1)
         }[dimension]
-        reduced_channels = max(in_channels // reduction, 1)
+        if not (0 < reduction <= 1):
+            raise ValueError("reduction must be a float in (0, 1], got {}".format(reduction))
+        reduced_channels = max(int(in_channels * reduction), 1)
         self.fc = nn.Sequential(
-            nn.Linear(in_channels,reduced_channels , bias=False),
+            nn.Linear(in_channels, reduced_channels, bias=False),
             nn.ReLU(inplace=True),
             nn.Linear(reduced_channels, in_channels, bias=False)
         )
@@ -141,7 +149,7 @@ class SpatialAttention(nn.Module):
 
 class CBAM(nn.Module):
     """Convolutional Block Attention Module."""
-    def __init__(self, in_channels, dimension=2, reduction=16, kernel_size=7):
+    def __init__(self, in_channels, dimension=2, reduction=0.25, kernel_size=7):
         super().__init__()
         self.ca = ChannelAttention(in_channels, dimension, reduction)
         self.sa = SpatialAttention(dimension, kernel_size)
@@ -155,7 +163,7 @@ class BaseConvBlock(nn.Module):
     """Basic convolutional block with optional attention and residual connections."""
     def __init__(self, in_channels, out_channels, dimension=2, kernel_size=3, stride=1,
                  use_batchnorm=True, activation='leaky_relu', dropout_rate=0.0,
-                 leaky_slope=0.1, bias=False, use_residual=False, use_attention=True,reduction=16):
+                 leaky_slope=0.1, bias=False, use_residual=False, use_attention=True, reduction=0.25):
         super().__init__()
         
         ConvNd, _, _, BatchNormNd, DropoutNd, ReflectionPadNd = getNdTools(dimension)
@@ -199,7 +207,7 @@ class UNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[64, 128, 256, 512], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True, reduction=16, use_skip_attention=False):
+                 use_attention=True, reduction=0.25, use_skip_attention=False):
         
         super().__init__()
         
@@ -266,7 +274,7 @@ class UNetPPBase(nn.Module):
     """UNet++ base with nested dense skip connections. Supports 1D/2D/3D."""
     def __init__(self, in_channels, num_filters=[64, 128, 256], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
-                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True, reduction=16):
+                 dropout_rate=0.0, leaky_slope=0.1, bias=False, use_attention=True, reduction=0.25):
         super().__init__()
         self.dimension = dimension  # Store dimension for use in forward_features
         _, ConvTransposeNd, MaxPoolNd, _, _, _ = getNdTools(dimension)
@@ -413,7 +421,7 @@ class LeNetBase(nn.Module):
     def __init__(self, in_channels, num_filters=[16, 32, 64], dimension=2,
                  kernel_size=3, use_batchnorm=True, activation='leaky_relu',
                  dropout_rate=0.0, leaky_slope=0.1, bias=False, use_residual=False,
-                 use_attention=True, reduction=16):
+                 use_attention=True, reduction=0.25):
         """LeNet base architecture with configurable parameters."""
         if len(num_filters) < 2:
             raise ValueError("LeNet requires at least 2 filter sizes")

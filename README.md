@@ -246,11 +246,11 @@ print(feat.shape)  # e.g., [2, 64 + R]
 | `EMAutoEncoder` | VAE/AE for latent space | Anomaly detection, feature learning |
 
 **All models support:**
-- ✅ 1D/2D/3D inputs
-- ✅ Radiomics features
-- ✅ Extra parameters (clinical metadata)
-- ✅ Fusion gating (when extra_params_dim > 0)
-- ✅ CBAM attention mechanisms
+- 1D/2D/3D inputs
+- Radiomics features
+- Extra parameters (clinical metadata)
+- Fusion gating (when extra_params_dim > 0)
+- CBAM attention mechanisms (now with percentage-based reduction: set `reduction=0.25` for 25% bottleneck)
 
 ---
 
