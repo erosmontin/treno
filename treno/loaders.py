@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Use pyable-dataloader for all dataset functionality
 try:
-    from pyable_dataloader import PyableDataset, Compose, IntensityNormalization, RandomFlip
+    from pyable_dataloader import PyableDataset, Compose
     PYABLE_DATALOADER_AVAILABLE = True
 except ImportError:
     PYABLE_DATALOADER_AVAILABLE = False
@@ -259,10 +259,7 @@ def create_treno_dataset_from_csv(
     # Create transforms if augmentation is enabled
     transforms = None
     if augmentation:
-        transforms = Compose([
-            IntensityNormalization(method='zscore'),
-            RandomFlip(axes=[1, 2], prob=0.5)
-        ])
+        transforms = Compose([])
     
     # Create dataset
     return TrenoDataset(
